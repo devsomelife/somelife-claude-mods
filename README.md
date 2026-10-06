@@ -12,8 +12,6 @@ Mods work in the Claude Code CLI and in the Claude desktop app (Code tab).
 
 ## Installation
 
-### From the marketplace (recommended)
-
 Add the marketplace once:
 
 ```bash
@@ -28,27 +26,6 @@ Then install the mods you want:
 
 - Update: `/plugin marketplace update somelife-claude-mods`
 - Disable or remove: `/plugin`, then pick the mod
-
-### From a local clone
-
-Load a mod for one terminal session:
-
-```bash
-claude --plugin-dir /path/to/somelife-claude-mods/plugins/greve-generale
-```
-
-Load mods in every session, desktop app included, through `env` in `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/somelife-claude-mods/plugins/greve-generale"
-  }
-}
-```
-
-- Paths are separated by `:`
-- Interactive sessions watch these folders: editing a mod reloads it live
 
 ## Repository Layout
 
