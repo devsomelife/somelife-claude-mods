@@ -12,7 +12,7 @@
       "name": "greve-generale",
       "source": "./plugins/greve-generale",
       "description": "Les outils de Claude se mettent en grève au hasard, pour des raisons très françaises",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "fun"
     }
   ]

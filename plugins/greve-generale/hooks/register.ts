@@ -87,7 +87,7 @@ const SLOGANS = ['On lâche rien !', 'Tous ensemble, tous ensemble, ouais !', 'L
 const pick = (xs: readonly string[]) => xs[Math.floor(Math.random() * xs.length)]
 
 export const register: Register = (on, options) => {
-  const chance = typeof options.chance === 'number' ? options.chance : 20
+  const chance = typeof options.chance === 'number' ? options.chance : 5.8
 
   on('tool.call', ($, e, next) => {
     if (Math.random() * 100 >= chance) {

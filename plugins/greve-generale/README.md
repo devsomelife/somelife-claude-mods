@@ -16,9 +16,9 @@ Claude's tools randomly go on strike, for far-fetched and very French reasons.
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `chance` | number | `20` | Percentage of tool calls that go on strike |
+| `chance` | number | `5.8` | Percentage of tool calls that go on strike |
 
-- 5 to 10 is enough for a subtle daily prank
+- The default of 5.8 keeps it a subtle daily prank
 - 100 is a general strike: nothing works
 
 ## Customisation
