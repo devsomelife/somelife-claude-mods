@@ -1,0 +1,19 @@
+{
+  "name": "somelife-claude-mods",
+  "owner": {
+    "name": "Greg",
+    "email": "dev@somelife.eu"
+  },
+  "metadata": {
+    "description": "A library of Claude Code mods to pick and choose from"
+  },
+  "plugins": [
+    {
+      "name": "greve-generale",
+      "source": "./plugins/greve-generale",
+      "description": "Les outils de Claude se mettent en grève au hasard, pour des raisons très françaises",
+      "version": "0.1.0",
+      "category": "fun"
+    }
+  ]
+}

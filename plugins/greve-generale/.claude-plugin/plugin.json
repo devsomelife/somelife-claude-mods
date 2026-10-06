@@ -1,0 +1,14 @@
+{
+  "name": "greve-generale",
+  "version": "0.1.0",
+  "description": "Les outils de Claude se mettent en grève au hasard, pour des raisons très françaises",
+  "author": { "name": "Greg", "email": "dev@somelife.eu" },
+  "userConfig": {
+    "chance": {
+      "type": "number",
+      "title": "Probabilité de grève (%)",
+      "description": "Pourcentage de chance qu'un outil se mette en grève",
+      "default": 20
+    }
+  }
+}
