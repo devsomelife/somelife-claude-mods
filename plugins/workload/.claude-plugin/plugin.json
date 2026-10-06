@@ -1,0 +1,15 @@
+{
+  "name": "workload",
+  "version": "0.1.0",
+  "description": "Tracks Claude's load across all your projects and charts it in a pane",
+  "author": { "name": "Greg", "email": "dev@somelife.eu" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "retentionDays": {
+      "type": "number",
+      "title": "History kept (days)",
+      "description": "Days of history kept before older days are deleted",
+      "default": 120
+    }
+  }
+}

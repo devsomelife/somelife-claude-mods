@@ -9,6 +9,7 @@ Mods work in the Claude Code CLI and in the Claude desktop app (Code tab).
 | Mod | Category | Summary | Changes Claude's behaviour |
 | --- | --- | --- | --- |
 | [greve-generale](plugins/greve-generale/README.md) | fun | Tools randomly go on strike for absurd French reasons | Yes, refuses some tool calls |
+| [workload](plugins/workload/README.md) | productivity | Daily load per project across all sessions, charted in a pane | No, display only |
 
 ## Installation
 
@@ -22,6 +23,10 @@ Then install the mods you want:
 
 ```bash
 /plugin install greve-generale@somelife-claude-mods
+```
+
+```bash
+/plugin install workload@somelife-claude-mods
 ```
 
 - Update: `/plugin marketplace update somelife-claude-mods`
