@@ -19,7 +19,7 @@
       "name": "workload",
       "source": "./plugins/workload",
       "description": "Tracks Claude's load across all your projects and charts it in a pane",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "productivity"
     }
   ]

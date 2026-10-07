@@ -64,8 +64,10 @@ test('records a turn under its project', async ($, on) => {
   await $.turn.complete(turn(45 * 60_000))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ text: /Active 45m \| 1 turns \| 1\.0k tokens \| 2 tools \| 1 sessions \| 1 projects/ })).toBeDefined()
-  expect(await ui.find({ text: /First 09h \| last 10h \| peak 10h/ })).toBeDefined()
+  expect(await ui.find({ key: 'kpi-active' })).toMatchObject({ text: '45m active' })
+  expect(await ui.find({ key: 'kpi-tokens' })).toMatchObject({ text: '1.0k tokens' })
+  expect(await ui.find({ key: 'kpi-tool calls' })).toMatchObject({ text: '2 tool calls' })
+  expect(await ui.find({ text: /First activity 09h, last 10h, peak 10h/ })).toBeDefined()
   expect(await ui.find({ text: /alpha/ })).toBeDefined()
 })
 
@@ -81,12 +83,28 @@ test('draws the pane on every surface', async ($, on) => {
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ text: /Share by project/ })).toBeDefined()
-    expect(await ui.find({ text: /Active 1h30/ })).toBeDefined()
-    expect(await ui.find({ text: /67%/ })).toBeDefined()
+    expect(await ui.find({ text: /Share of time by project/ })).toBeDefined()
+    expect(await ui.find({ key: 'kpi-active' })).toBeDefined()
+    if (surface === 'terminal') {
+      expect(await ui.find({ key: 'share-alpha' })).toMatchObject({ text: expect.stringMatching(/alpha.*1h00.*67%/) })
+    } else {
+      const charts = await ui.findAll({ type: 'Svg' })
+      expect(charts).toHaveLength(2)
+      expect(String(charts[0]?.props.alt)).toContain('alpha 1h00 (67%)')
+    }
+
+    expect(await ui.find({ text: /daily split/i })).toBeDefined()
+    expect(await ui.find({ key: 'hours' })).toBeDefined()
+    expect(await ui.find({ key: 'days' })).toBeUndefined()
 
     await ui.press({ key: 'range-week' })
-    expect(await ui.find({ text: /Load by day/ })).toBeDefined()
+    expect(await ui.find({ text: /weekly split/i })).toBeDefined()
+    expect(await ui.find({ key: 'days' })).toBeDefined()
+    expect(await ui.find({ key: 'hours' })).toBeUndefined()
+    expect(await ui.find({ text: /Time by day/ })).toBeDefined()
+    await ui.press({ key: 'metric-tokens' })
+    expect(await ui.find({ text: /Tokens by day/ })).toBeDefined()
+    await ui.press({ key: 'metric-time' })
     await ui.press({ key: 'range-day' })
     await ui.unmount()
   }

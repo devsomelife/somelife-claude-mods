@@ -15,23 +15,28 @@ Tracks how much Claude works on each of your projects, across every session, and
 
 ## Pane
 
-| Section | Content |
-| --- | --- |
-| Summary | Active time, turns, tokens, tool calls, sessions, projects, first and last active hour, peak hour |
-| Share by project | One bar per project, value and percentage for the chosen metric |
-| Active time by hour | One row per project, one cell per hour, shaded by active time, plus an overall sparkline |
-| Load by day | Week and 30 days views: one stacked bar per day, one color per project |
-| Stats by project | Time, share, turns, tokens, tool calls, sessions, peak hour |
+Three modes, picked from the tab row at the top: **Daily split**, **Weekly split**, **30-day split**. The mode's title and period sit under the tabs, then one framed section per block:
+
+| Section | Daily split | Weekly and 30-day split |
+| --- | --- | --- |
+| Summary | Active time, turns, tokens, tool calls, sessions, projects, first, last and peak hour | Same, over the period |
+| Share by project | One bar per project, value and percentage for the chosen metric | Same |
+| Chart | Active time by hour, one stacked column per hour | Chosen metric by day, one stacked column per day |
+| Stats by project | Time, share, turns, tokens, tool calls, sessions, peak hour | Same |
+
+- Desktop app: SVG charts with hover tooltips, following the light or dark theme
+- Terminal: text bars, an hour-by-project heatmap and the same stats table
+- Each project keeps its color everywhere, from the first time it is recorded; past 8 projects, the extra ones share a gray
 
 Controls (hotkeys work once the pane has focus):
 
 | Control | Hotkey |
 | --- | --- |
-| Previous / next period, back to today | `h` / `l` / `t` |
-| Day, week, 30 days | `d` / `w` / `m` |
+| Previous / next day or week, back to the current one | `h` / `l` / `t` |
+| Daily, weekly, 30-day split | `d` / `w` / `m` |
 | Metric: time, tokens, turns, tools | `1` / `2` / `3` / `4` |
-| Show one project only | click its name in "Share by project" |
-| Back to all projects | `a` |
+| Show one project only | project picker |
+| Back to all projects | "All projects" in the picker |
 
 ## Settings
 
