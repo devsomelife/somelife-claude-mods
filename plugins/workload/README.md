@@ -44,6 +44,12 @@ Controls (hotkeys work once the pane has focus):
 | --- | --- | --- | --- |
 | `retentionDays` | number | `120` | Days of history kept; older days are deleted when a session starts |
 
+Change it, then restart Claude Code:
+
+```bash
+echo '{"retentionDays":"365"}' | claude plugin configure workload@somelife-claude-mods --values-stdin
+```
+
 ## Data
 
 - Stored in the mod's own store under the Claude Code configuration directory, one entry per day

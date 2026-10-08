@@ -21,6 +21,16 @@ Claude's tools randomly go on strike, for far-fetched and very French reasons.
 - The default of 5.8 keeps it a subtle daily prank
 - 100 is a general strike: nothing works
 
+Change it, then restart Claude Code:
+
+```text
+/plugin configure greve-generale@somelife-claude-mods
+```
+
+```bash
+echo '{"chance":"10"}' | claude plugin configure greve-generale@somelife-claude-mods --values-stdin
+```
+
 ## Customisation
 
 Edit the lists at the top of `hooks/register.ts`:
