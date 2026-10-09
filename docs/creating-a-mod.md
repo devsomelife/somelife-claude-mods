@@ -77,4 +77,5 @@ test('lets every tool call through', async ($, on) => {
 - Each README states whether the mod changes Claude's behaviour or only the display
 - Settings that affect behaviour (probabilities, thresholds) go in `userConfig`, never hard-coded
 - No mod hides what it does, bypasses permissions or sends data elsewhere
+- Slash commands are named `some-<mod-name>` (for example `/some-workload`), so every mod's commands group together and never clash with built-in ones
 - Bump `version` in both `plugin.json` and `marketplace.json` on each change
