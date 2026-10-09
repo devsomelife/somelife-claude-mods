@@ -30,7 +30,7 @@ Common events:
    - `hooks/register.ts`
    - `hooks/<mod-name>.test.ts`
    - `tsconfig.json`: `{ "extends": "./.claude-plugin/types/tsconfig.json" }`
-   - `README.md`: the mod's own mini doc, see [Mod README](#mod-readme)
+   - `README.md`, based on an existing mod's README
 2. Try it live:
    ```bash
    claude --plugin-dir plugins/<mod-name>
@@ -45,25 +45,6 @@ Common events:
 4. Add an entry to `.claude-plugin/marketplace.json`
 5. Add a row to the catalog in the root `README.md`
 6. Commit with a Conventional Commits message, for example `feat(<mod-name>): add mod`
-
-## Mod README
-
-Each mod's README is a standalone mini doc: a reader who lands on it needs nothing from the root README.
-
-Sections, in this order:
-
-| Section | Content |
-| --- | --- |
-| `# <mod-name>` and one line | What the mod does |
-| Behaviour | What happens, and "Changes Claude's behaviour: yes/no" with the reason |
-| Install | Marketplace add and install, from Claude Code and from a shell |
-| Update | Marketplace update, plugin update, restart |
-| Settings | Table of `userConfig` fields, then how to change them from Claude Code and from a shell |
-| Mod-specific sections | Pane, controls, data, customisation, as the mod needs |
-| Uninstall | Uninstall, and disable / enable to pause |
-
-- Claude Code slash commands go in `text` blocks, shell commands in `bash` blocks, one command per block
-- Copy the Install, Update and Uninstall sections from an existing mod and change the name
 
 ## Tests
 
