@@ -87,8 +87,6 @@ plugins/
       <mod-name>.test.ts  tests
     tsconfig.json
     README.md             what the mod does, settings
-docs/
-  creating-a-mod.md       how to add a mod to this library
 ```
 
 ## Security
@@ -96,7 +94,3 @@ docs/
 - Mods are not sandboxed: they run with the same access as Claude Code
 - Read a mod's `hooks/register.ts` before installing it
 - Every mod in this library must list in its README what it changes
-
-## Contributing
-
-See [docs/creating-a-mod.md](docs/creating-a-mod.md).
