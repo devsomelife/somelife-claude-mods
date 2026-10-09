@@ -10,6 +10,8 @@ Tracks how much Claude works on each of your projects, across every session, and
 | Changes Claude's behaviour | No, it only records and displays |
 | Settings | `retentionDays`: days of history kept (120) |
 
+![Workload pane in the daily split, with made-up projects](screenshot.png)
+
 ## Behaviour
 
 - Global: every session with the mod installed writes to the same history, whatever the project
