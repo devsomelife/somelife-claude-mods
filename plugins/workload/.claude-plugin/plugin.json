@@ -1,6 +1,6 @@
 {
   "name": "workload",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Tracks Claude's load across all your projects and charts it in a pane",
   "author": { "name": "Greg", "email": "dev@somelife.eu" },
   "types": "./types/index.d.ts",

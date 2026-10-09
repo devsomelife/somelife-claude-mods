@@ -359,14 +359,14 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'workload',
+      name: 'some-workload',
       description: 'Show the load across your projects in a pane',
     })
     await prune($, retentionDays)
     return next(e)
   })
 
-  on('command.run', { command: 'workload' }, async $ => {
+  on('command.run', { command: 'some-workload' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Workload' })
     return { text: 'Workload pane opened.' }
   })

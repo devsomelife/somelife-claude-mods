@@ -4,7 +4,7 @@ Tracks how much Claude works on each of your projects, across every session, and
 
 | | |
 | --- | --- |
-| Use | `/workload` opens the pane |
+| Use | `/some-workload` opens the pane |
 | Records | Claude's working time per project and hour, turns, tokens, tool calls, sessions |
 | Views | Daily, weekly and 30-day split, by time, tokens, turns or tools |
 | Changes Claude's behaviour | No, it only records and displays |
@@ -17,7 +17,7 @@ Tracks how much Claude works on each of your projects, across every session, and
 - Recorded at the end of each turn, per project and per day:
   - Active time: how long Claude worked on the turn, split by hour of the day
   - Turns, tokens (input, output and cache, subagents included), tool calls, sessions
-- `/workload` opens the pane
+- `/some-workload` opens the pane
 
 **Changes Claude's behaviour:** no. It only records and displays.
 
