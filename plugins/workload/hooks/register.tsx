@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { BoxProps, ElementConstructor, EngineInterface, Register, RenderChildren, TextProps, TurnCompleteInput } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, TurnCompleteInput } from 'claude-code'
 
 import type { WorkloadMetric, WorkloadRange, WorkloadView } from '../types'
 
@@ -15,13 +15,9 @@ export type ProjectDay = {
 
 export type DayLog = Record<string, ProjectDay>
 
-// One bar of a column chart: a label under it and a stacked part per project
-type Column = { label: string; parts: { name: string; value: number }[] }
-
 const PANE = 'workload'
 const HOUR = 3_600_000
 const DAY_PREFIX = 'day:'
-const COLORS_KEY = 'colors'
 const ALL = '*'
 const SPANS: Record<WorkloadRange, number> = { day: 1, week: 7, month: 30 }
 const METRICS: { id: WorkloadMetric; label: string; hotkey: string }[] = [
@@ -50,14 +46,11 @@ const STAT_COLUMNS: { id: string; label: string; tip: string }[] = [
 const TIP_BG = '#2b2b29'
 const TIP_FG = '#f2f1ec'
 
-// Validated categorical palette, one fixed slot per project; past 8, projects share "other"
-const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
-const SERIES_DARK = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767']
-const OTHER_LIGHT = '#a3a29c'
-const OTHER_DARK = '#6b6a65'
-// Sequential blue ramp for the terminal heatmap, near zero to max
-const HEAT = ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab']
-const SHADES = ['░', '▒', '▓', '█']
+// Card colors, readable on light and dark themes; past the top projects, "Other" is gray
+const PALETTE = ['#3987e5', '#e8743b', '#1baf7a', '#eda100', '#e87ba4', '#9085e9']
+const OTHER = '#8a8984'
+const SPARKS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+const CARD_W = 30
 
 const view = atom({ plugin: 'workload', key: 'view' } as const, {
   range: 'day',
@@ -110,8 +103,6 @@ const projectOf = async ($: EngineInterface) => {
 
 const loadDay = async ($: EngineInterface, day: string) => ((await $.store.get(DAY_PREFIX + day)) ?? {}) as DayLog
 
-const loadSlots = async ($: EngineInterface) => ((await $.store.get(COLORS_KEY)) ?? {}) as Record<string, number>
-
 const metricOf = (p: ProjectDay, metric: WorkloadMetric) =>
   metric === 'time' ? p.activeMs : metric === 'tokens' ? p.tokens : metric === 'turns' ? p.turns : p.tools
 
@@ -142,137 +133,26 @@ const peakHour = (hours: number[]) => hours.reduce((best, ms, h) => (ms > (hours
 
 const weekday = (day: string) => new Date(`${day}T12:00:00`).toDateString().slice(0, 3)
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const plural = (n: number, word: string) => `${fmtCount(n)} ${word}${n === 1 ? '' : 's'}`
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}.` : s)
 
-// SVG theme: text in neutral ink, series in the palette, dark steps under a dark scheme
-const SVG_STYLE = `<style>
-text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}
-.l{font-size:12px;fill:#52514e}.v{font-size:12px;fill:#0b0b0b}.a{font-size:11px;fill:#8a8984}
-.g{stroke:#e4e3df;stroke-width:1}.b{stroke:#c9c8c2;stroke-width:1}.hit{fill:transparent}.hit:hover{fill:rgba(128,128,128,.08)}
-${SERIES_LIGHT.map((c, i) => `.s${i}{fill:${c}}`).join('')}.so{fill:${OTHER_LIGHT}}
-@media (prefers-color-scheme:dark){.l{fill:#c3c2b7}.v{fill:#fff}.a{fill:#8f8e88}.g{stroke:#30302e}.b{stroke:#4a4a46}
-${SERIES_DARK.map((c, i) => `.s${i}{fill:${c}}`).join('')}.so{fill:${OTHER_DARK}}}
-</style>`
-
-const svgDoc = (w: number, h: number, body: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${SVG_STYLE}${body}</svg>`
-
-// Horizontal bar, square at the baseline, rounded at the data end
-const hbar = (x: number, y: number, w: number, h: number, cls: string) => {
-  const r = Math.min(4, w / 2, h / 2)
-  if (w <= 0) return ''
-  return `<path class="${cls}" d="M${x} ${y}h${w - r}a${r} ${r} 0 0 1 ${r} ${r}v${h - 2 * r}a${r} ${r} 0 0 1 ${-r} ${r}h${r - w}z"/>`
+// Folds `values` into at most `width` buckets by summing neighbours
+export const resample = (values: number[], width: number) => {
+  if (values.length <= width) return values
+  return Array.from({ length: width }, (_, i) => {
+    const from = Math.floor((i * values.length) / width)
+    const to = Math.floor(((i + 1) * values.length) / width)
+    return values.slice(from, to).reduce((s, n) => s + n, 0)
+  })
 }
 
-// Vertical segment; only the top one of a stack is rounded
-const vbar = (x: number, y: number, w: number, h: number, cls: string, isTop: boolean) => {
-  if (h <= 0) return ''
-  if (!isTop) return `<rect class="${cls}" x="${x}" y="${y}" width="${w}" height="${h}"/>`
-  const r = Math.min(4, w / 2, h)
-  return `<path class="${cls}" d="M${x} ${y + h}v${r - h}a${r} ${r} 0 0 1 ${r} ${-r}h${w - 2 * r}a${r} ${r} 0 0 1 ${r} ${r}v${h - r}z"/>`
-}
-
-const shareSvg = (
-  rows: { name: string; value: number; pct: number }[],
-  w: number,
-  cls: (name: string) => string,
-  metric: WorkloadMetric,
-) => {
-  const rowH = 28
-  const nameW = Math.min(170, Math.round(w * 0.32))
-  const valueW = 92
-  const barX = nameW + 10
-  const barMax = Math.max(20, w - barX - valueW - 8)
-  const top = Math.max(1, ...rows.map(r => r.value))
-  const body = rows
-    .map((r, i) => {
-      const y = i * rowH
-      const bw = r.value > 0 ? Math.max(3, (r.value / top) * barMax) : 0
-      const tip = `${r.name}: ${fmtMetric(r.value, metric)} (${r.pct}%)`
-      return (
-        `<g><title>${esc(tip)}</title><rect class="hit" x="0" y="${y}" width="${w}" height="${rowH}"/>` +
-        `<text class="l" x="0" y="${y + 18}">${esc(clip(r.name, Math.floor(nameW / 7)))}</text>` +
-        hbar(barX, y + 8, bw, 12, cls(r.name)) +
-        `<text class="v" x="${w - 40}" y="${y + 18}" text-anchor="end">${fmtMetric(r.value, metric)}</text>` +
-        `<text class="a" x="${w}" y="${y + 18}" text-anchor="end">${r.pct}%</text></g>`
-      )
-    })
+// One bar glyph per bucket, stretched to `width`, scaled to `max`
+export const sparkline = (buckets: number[], width: number, max: number) => {
+  const per = Math.max(1, Math.floor(width / Math.max(1, buckets.length)))
+  return buckets
+    .map(n => (n > 0 ? (SPARKS[Math.min(7, Math.floor((n / Math.max(1, max)) * 7.999))] ?? ' ') : ' ').repeat(per))
     .join('')
-  return svgDoc(w, rows.length * rowH, body)
-}
-
-// A round gridline step giving at most 3 lines over `max`
-export const niceStep = (max: number, isTime: boolean) => {
-  const raw = max / 3
-  const steps = isTime
-    ? [1, 2, 5, 10, 15, 30, 60, 120, 180, 240, 360, 480, 720].map(m => m * 60_000)
-    : [1, 2, 2.5, 5].flatMap(f => [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8].map(p => f * p)).sort((a, b) => a - b)
-  return steps.find(st => st >= raw) ?? raw
-}
-
-const columnsSvg = (
-  columns: Column[],
-  order: string[],
-  w: number,
-  cls: (name: string) => string,
-  fmt: (n: number) => string,
-  labelEvery: number,
-  isTime: boolean,
-) => {
-  const legendH = order.length > 1 ? 26 : 0
-  const plotTop = legendH + 8
-  const plotH = 150
-  const axisW = 46
-  const h = plotTop + plotH + 22
-  const plotW = w - axisW
-  const colW = plotW / Math.max(1, columns.length)
-  const barW = Math.max(3, Math.min(28, colW * 0.64))
-  const totals = columns.map(c => c.parts.reduce((s, p) => s + p.value, 0))
-  const step = niceStep(Math.max(1, ...totals), isTime)
-  const max = step * Math.max(1, Math.ceil(Math.max(1, ...totals) / step))
-  const base = plotTop + plotH
-
-  let legend = ''
-  let lx = 0
-  for (const name of order) {
-    const label = clip(name, 22)
-    legend += `<rect class="${cls(name)}" x="${lx}" y="6" width="10" height="10" rx="2"/><text class="l" x="${lx + 15}" y="15">${esc(label)}</text>`
-    lx += 15 + label.length * 7 + 16
-    if (lx > w - 60) break
-  }
-
-  const grid = Array.from({ length: Math.round(max / step) }, (_, i) => (i + 1) * step)
-    .map(n => {
-      const y = base - (n / max) * plotH
-      return `<line class="g" x1="${axisW}" x2="${w}" y1="${y}" y2="${y}"/><text class="a" x="${axisW - 6}" y="${y + 4}" text-anchor="end">${fmt(n)}</text>`
-    })
-    .join('')
-
-  const bars = columns
-    .map((c, i) => {
-      const x = axisW + i * colW + (colW - barW) / 2
-      const parts = order.map(name => ({ name, value: c.parts.find(p => p.name === name)?.value ?? 0 })).filter(p => p.value > 0)
-      const tip = [`${c.label}: ${fmt(totals[i] ?? 0)}`, ...parts.map(p => `${p.name}: ${fmt(p.value)}`)].join('\n')
-      let y = base
-      const segs = parts
-        .map((p, j) => {
-          const full = (p.value / max) * plotH
-          const segH = Math.max(1, full - (j > 0 ? 2 : 0))
-          y -= full
-          return vbar(x, y + (full - segH), barW, segH, cls(p.name), j === parts.length - 1)
-        })
-        .join('')
-      const label =
-        i % labelEvery === 0
-          ? `<text class="a" x="${axisW + i * colW + colW / 2}" y="${base + 16}" text-anchor="middle">${esc(c.label)}</text>`
-          : ''
-      return `<g><title>${esc(tip)}</title><rect class="hit" x="${axisW + i * colW}" y="${plotTop}" width="${colW}" height="${plotH}"/>${segs}</g>${label}`
-    })
-    .join('')
-
-  return svgDoc(w, h, `${legend}${grid}<line class="b" x1="${axisW}" x2="${w}" y1="${base}" y2="${base}"/>${bars}`)
 }
 
 // Tool calls of the running turn, written when the main turn completes
@@ -292,18 +172,6 @@ async function edit($: EngineInterface, day: string, project: string, fn: (p: Pr
   return queue
 }
 
-// Gives a project its color slot the first time it is seen, so it keeps it everywhere
-async function ensureSlot($: EngineInterface, project: string) {
-  const run = async () => {
-    const slots = await loadSlots($)
-    if (slots[project] !== undefined) return
-    slots[project] = Object.keys(slots).length
-    await $.store.set(COLORS_KEY, slots)
-  }
-  queue = queue.then(run, run)
-  return queue
-}
-
 async function bumpRev($: EngineInterface) {
   await update($, rev, n => (n ?? 0) + 1)
 }
@@ -315,8 +183,6 @@ async function recordTurn($: EngineInterface, e: TurnCompleteInput) {
   const tokens = u
     ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
     : 0
-
-  await ensureSlot($, project)
 
   if (e.agentId !== undefined) {
     if (tokens > 0) await edit($, dayKey(now), project, p => (p.tokens += tokens))
@@ -384,6 +250,9 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const els = $.ui.resolve(e)
+    const { Box, Text, Button } = els
+    const Select = 'Select' in els ? els.Select : undefined
     await read($, rev)
     const v = await read($, view)
     const now = await $.clock.now()
@@ -391,19 +260,10 @@ export const register: Register = (on, options) => {
     const anchor = now - v.offset * span * 24 * HOUR
     const days = Array.from({ length: span }, (_, i) => dayKey(anchor - (span - 1 - i) * 24 * HOUR))
     const logs = await Promise.all(days.map(d => loadDay($, d)))
-    const stored = await loadSlots($)
-    const cols = Math.max(40, e.props.bodyColumns)
+    const cols = Math.max(32, e.props.bodyColumns)
 
-    // Every project keeps one color slot; ones never recorded with a slot take the next free ones
     const allProjects = [...new Set(logs.flatMap(l => Object.keys(l)))].sort()
-    const slots = { ...stored }
-    for (const name of allProjects) if (slots[name] === undefined) slots[name] = Object.keys(slots).length
-    const slotOf = (name: string) => {
-      const s = slots[name] ?? 99
-      return s < SERIES_LIGHT.length ? s : -1
-    }
     const keep = (name: string) => v.project === null || v.project === name
-
     const totals = new Map<string, ProjectDay>()
     for (const log of logs) {
       for (const [name, p] of Object.entries(log)) {
@@ -416,7 +276,6 @@ export const register: Register = (on, options) => {
     const all = emptyProject()
     for (const p of totals.values()) merge(all, p)
     const ranked = [...totals.entries()].sort((a, b) => metricOf(b[1], v.metric) - metricOf(a[1], v.metric))
-    const order = ranked.map(([name]) => name)
     const grand = metricOf(all, v.metric)
     const pctOf = (n: number, of: number) => (of > 0 ? Math.round((n / of) * 100) : 0)
 
@@ -432,232 +291,12 @@ export const register: Register = (on, options) => {
         ? `${new Date(anchor).toDateString()}${v.offset === 0 ? ' (today)' : ''}`
         : `${short(days[0] ?? '')} to ${short(days[days.length - 1] ?? '')}${v.offset === 0 ? ` (${mode.current.toLowerCase()})` : ''}`
     const pickProject = (value: string) => void update($, view, cur => ({ ...cur, project: value === ALL ? null : value }))
-
-    const activeHours = all.hours.map((ms, hr) => (ms > 0 ? hr : -1)).filter(hr => hr >= 0)
-    const kpis = [
-      { label: 'active', value: fmtDuration(all.activeMs) },
-      { label: 'turns', value: fmtCount(all.turns) },
-      { label: 'tokens', value: fmtCount(all.tokens) },
-      { label: 'tool calls', value: fmtCount(all.tools) },
-      { label: 'sessions', value: String(all.sessions.length) },
-      { label: 'projects', value: String(ranked.length) },
-    ]
-    const rhythm =
-      activeHours.length > 0
-        ? `First activity ${hourLabel(activeHours[0] ?? 0)}, last ${hourLabel(activeHours[activeHours.length - 1] ?? 0)}, peak ${hourLabel(peakHour(all.hours))}`
-        : ''
-
-    // Day: active time by hour; week and 30 days: chosen metric by day
-    const byHour = span === 1
-    const columns: Column[] = byHour
-      ? Array.from({ length: 24 }, (_, hr) => ({
-          label: pad2(hr),
-          parts: ranked.map(([name, p]) => ({ name, value: p.hours[hr] ?? 0 })),
-        }))
-      : days.map((day, i) => ({
-          label: span === 7 ? `${weekday(day)} ${day.slice(8)}` : day.slice(5),
-          parts: Object.entries(logs[i] ?? {})
-            .filter(([name]) => keep(name))
-            .map(([name, p]) => ({ name, value: metricOf({ ...emptyProject(), ...p }, v.metric) })),
-        }))
-    const columnsTitle = byHour ? 'Active time by hour' : `${METRICS.find(m => m.id === v.metric)?.label ?? ''} by day`
-    const columnsFmt = (n: number) => (byHour ? fmtDuration(n) : fmtMetric(n, v.metric))
-    const shareTitle = `Share of ${(METRICS.find(m => m.id === v.metric)?.label ?? '').toLowerCase()} by project`
-
-    const statRows = ranked.map(([name, p]) => [
-      name,
-      fmtDuration(p.activeMs),
-      `${pctOf(p.activeMs, all.activeMs)}%`,
-      fmtCount(p.turns),
-      fmtCount(p.tokens),
-      fmtCount(p.tools),
-      String(p.sessions.length),
-      p.activeMs > 0 ? hourLabel(peakHour(p.hours)) : '-',
-    ])
-    const statNameW = Math.min(24, Math.max(8, ...order.map(n => n.length)) + 1)
-
-    // A table whose column names reveal their explanation on hover
-    const statsTable = (Box: ElementConstructor<BoxProps>, Text: ElementConstructor<TextProps>) => (
-      <Box flexDirection="column">
-        <Box flexDirection="row">
-          {STAT_COLUMNS.map((c, i) => (
-            <Box key={`col-${c.id}`} width={i === 0 ? statNameW : 9} justifyContent={i === 0 ? 'flex-start' : 'flex-end'}>
-              <Text bold underline>{c.label}</Text>
-              <Box
-                position="absolute"
-                top={1}
-                {...(i < STAT_COLUMNS.length / 2 ? { left: 0 } : { right: 0 })}
-                width={34}
-                display="none"
-                hover={{ display: 'flex' }}
-                backgroundColor={TIP_BG}
-                paddingX={1}
-              >
-                <Text color={TIP_FG} wrap="wrap">{c.tip}</Text>
-              </Box>
-            </Box>
-          ))}
-        </Box>
-        {statRows.map(row => (
-          <Box key={`stat-${row[0]}`} flexDirection="row">
-            {row.map((cell, i) => (
-              <Box key={`stat-${row[0]}-${i}`} width={i === 0 ? statNameW : 9} justifyContent={i === 0 ? 'flex-start' : 'flex-end'}>
-                <Text dimColor={i > 0 && cell === '-'}>{i === 0 ? clip(cell, statNameW - 1) : cell}</Text>
-              </Box>
-            ))}
-          </Box>
-        ))}
-        <Text dimColor>Hover a column name for its meaning</Text>
-      </Box>
-    )
+    const metricLabel = METRICS.find(m => m.id === v.metric)?.label ?? ''
 
     const projectOptions = [
       { value: ALL, label: 'All projects' },
       ...allProjects.map(name => ({ value: name, label: name })),
     ]
-
-    if (e.surface === 'terminal') {
-      const { Box, Text, Button, Select } = $.ui.resolve(e)
-      const colorOf = (name: string) => SERIES_LIGHT[slotOf(name)] ?? OTHER_LIGHT
-      const section = (key: string, title: string, body: RenderChildren) => (
-        <Box key={key} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
-          <Text bold color="#3987e5">{title}</Text>
-          {body}
-        </Box>
-      )
-
-      const header = (
-        <Box flexDirection="column" gap={1}>
-          <Box flexDirection="row" gap={1} flexWrap="wrap">
-            {RANGES.map(r => (
-              <Button key={`range-${r.id}`} label={r.label} hotkey={r.hotkey} variant={v.range === r.id ? 'primary' : undefined} onPress={set({ range: r.id, offset: 0 })} />
-            ))}
-          </Box>
-          <Box flexDirection="column">
-            <Text bold>{mode.title.toUpperCase()}</Text>
-            <Text dimColor>{period}</Text>
-          </Box>
-          <Box flexDirection="column">
-            <Box flexDirection="row" gap={1} flexWrap="wrap">
-              <Button key="prev" label={`Prev ${mode.unit}`} hotkey="h" onPress={set({ offset: v.offset + 1 })} />
-              <Button key="current" label={mode.current} hotkey="t" onPress={set({ offset: 0 })} />
-              {v.offset > 0 && <Button key="next" label={`Next ${mode.unit}`} hotkey="l" onPress={set({ offset: Math.max(0, v.offset - 1) })} />}
-            </Box>
-            <Box flexDirection="row" gap={1} flexWrap="wrap">
-              {METRICS.map(m => (
-                <Button key={`metric-${m.id}`} label={m.label} hotkey={m.hotkey} variant={v.metric === m.id ? 'primary' : undefined} onPress={set({ metric: m.id })} />
-              ))}
-              {allProjects.length > 1 && <Select key="project" options={projectOptions} value={v.project ?? ALL} onSelect={pickProject} />}
-            </Box>
-          </Box>
-        </Box>
-      )
-
-      if (ranked.length === 0) {
-        return (
-          <Box flexDirection="column" gap={1}>
-            {header}
-            <Text dimColor>No activity recorded for this period.</Text>
-          </Box>
-        )
-      }
-
-      const inner = cols - 4
-      const nameW = Math.min(22, Math.max(7, ...order.map(n => n.length)))
-      const valW = 12
-      const barW = Math.max(6, inner - nameW - valW - 2)
-      const topShare = Math.max(1, metricOf(ranked[0]?.[1] ?? emptyProject(), v.metric))
-
-      const cellW = inner - nameW - 1 >= 48 ? 2 : 1
-      const maxCell = Math.max(1, ...ranked.flatMap(([, p]) => p.hours))
-      const axis = Array.from({ length: 24 }, (_, hr) => (hr % 3 === 0 ? pad2(hr) : '').padEnd(cellW)).join('')
-      const dayW = 12
-      const stackW = Math.max(6, inner - dayW - 8)
-      const maxDay = Math.max(1, ...columns.map(c => c.parts.reduce((s, p) => s + p.value, 0)))
-
-      const summary = (
-        <Box flexDirection="column">
-          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-            {kpis.map(k => (
-              <Box key={`kpi-${k.label}`} flexDirection="row">
-                <Text bold>{k.value}</Text>
-                <Text dimColor> {k.label}</Text>
-              </Box>
-            ))}
-          </Box>
-          {rhythm !== '' && <Text dimColor>{rhythm}</Text>}
-        </Box>
-      )
-
-      const share = ranked.map(([name, p]) => {
-        const value = metricOf(p, v.metric)
-        return (
-          <Box key={`share-${name}`} flexDirection="row">
-            <Text>{clip(name, nameW).padEnd(nameW)} </Text>
-            <Text color={colorOf(name)}>{'■'.repeat(value > 0 ? Math.max(1, Math.round((value / topShare) * barW)) : 0).padEnd(barW)}</Text>
-            <Text>{fmtMetric(value, v.metric).padStart(valW - 5)}</Text>
-            <Text dimColor>{`${pctOf(value, grand)}%`.padStart(5)}</Text>
-          </Box>
-        )
-      })
-
-      const heatmap = [
-        <Text key="axis" dimColor>{' '.repeat(nameW + 1) + axis}</Text>,
-        ...ranked.map(([name, p]) => (
-          <Box key={`hours-${name}`} flexDirection="row">
-            <Text>{clip(name, nameW).padEnd(nameW)} </Text>
-            {p.hours.map((ms, hr) => {
-              const level = ms > 0 ? Math.min(3, Math.floor((ms / maxCell) * 3.999)) : -1
-              return (
-                <Text key={`cell-${name}-${hr}`} color={level >= 0 ? HEAT[level] : undefined} dimColor={level < 0}>
-                  {(level >= 0 ? (SHADES[level] ?? ' ') : '·').repeat(cellW)}
-                </Text>
-              )
-            })}
-          </Box>
-        )),
-      ]
-
-      const dailyBars = columns.map((c, i) => {
-        const sum = c.parts.reduce((s, p) => s + p.value, 0)
-        return (
-          <Box key={`day-${days[i]}`} flexDirection="row">
-            <Text dimColor={sum === 0}>{c.label.padEnd(dayW)}</Text>
-            {order.map(name => {
-              const n = c.parts.find(p => p.name === name)?.value ?? 0
-              return (
-                <Text key={`seg-${days[i]}-${name}`} color={colorOf(name)}>
-                  {'█'.repeat(n > 0 ? Math.max(1, Math.round((n / maxDay) * stackW)) : 0)}
-                </Text>
-              )
-            })}
-            <Text dimColor> {sum > 0 ? fmtMetric(sum, v.metric) : ''}</Text>
-          </Box>
-        )
-      })
-
-      return (
-        <Box flexDirection="column" gap={1}>
-          {header}
-          {section('summary', 'Summary', summary)}
-          {section('share', shareTitle, share)}
-          {byHour ? section('hours', columnsTitle, heatmap) : section('days', columnsTitle, dailyBars)}
-          {section('stats', 'Stats by project', statsTable(Box, Text))}
-        </Box>
-      )
-    }
-
-    const els = $.ui.resolve(e)
-    const { Box, Text, Button, Svg } = els
-    const Select = 'Select' in els ? els.Select : undefined
-    const cls = (name: string) => (slotOf(name) >= 0 ? `s${slotOf(name)}` : 'so')
-    const w = Math.max(260, Math.min(740, (cols - 4) * 8))
-    const section = (key: string, title: string, body: RenderChildren) => (
-      <Box key={key} flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1} paddingY={1}>
-        <Text bold>{title}</Text>
-        {body}
-      </Box>
-    )
 
     const header = (
       <Box flexDirection="column" gap={1}>
@@ -693,12 +332,48 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const shareRows = ranked.map(([name, p]) => {
-      const value = metricOf(p, v.metric)
-      return { name, value, pct: pctOf(value, grand) }
-    })
-    const labelEvery = byHour ? 3 : span === 7 ? 1 : 5
+    const section = (key: string, title: string, body: RenderChildren) => (
+      <Box key={key} flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+        <Text bold>{title}</Text>
+        {body}
+      </Box>
+    )
 
+    // Day view: active time per hour over the active window; week and 30 days: chosen metric per day
+    const byHour = span === 1
+    const activeHours = all.hours.map((ms, hr) => (ms > 0 ? hr : -1)).filter(hr => hr >= 0)
+    const firstHour = activeHours[0] ?? 0
+    const lastHour = activeHours[activeHours.length - 1] ?? 23
+    const from = Math.max(0, Math.min(firstHour, lastHour - 5))
+    const to = Math.min(23, Math.max(lastHour, from + 5))
+    const seriesOf = (names: string[]) =>
+      byHour
+        ? Array.from({ length: to - from + 1 }, (_, i) =>
+            names.reduce((s, name) => s + (totals.get(name)?.hours[from + i] ?? 0), 0),
+          )
+        : logs.map(log =>
+            names.reduce((s, name) => s + metricOf({ ...emptyProject(), ...log[name] }, v.metric), 0),
+          )
+    const axis = byHour
+      ? [hourLabel(from), hourLabel(to)]
+      : [`${weekday(days[0] ?? '')} ${(days[0] ?? '').slice(8)}`, `${weekday(days[days.length - 1] ?? '')} ${(days[days.length - 1] ?? '').slice(8)}`]
+    const trendTitle = byHour ? 'Working time by hour' : `${metricLabel} by day`
+
+    const kpis = [
+      { label: 'active', value: fmtDuration(all.activeMs) },
+      { label: 'turns', value: fmtCount(all.turns) },
+      { label: 'tokens', value: fmtCount(all.tokens) },
+      { label: 'tool calls', value: fmtCount(all.tools) },
+      { label: 'sessions', value: String(all.sessions.length) },
+      { label: 'projects', value: String(ranked.length) },
+    ]
+    const rhythm =
+      activeHours.length > 0
+        ? `First activity ${hourLabel(firstHour)}, last ${hourLabel(lastHour)}, peak ${hourLabel(peakHour(all.hours))}`
+        : ''
+
+    const trendW = Math.max(12, cols - 6)
+    const trendBuckets = resample(seriesOf(ranked.map(([n]) => n)), trendW)
     const summary = (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" flexWrap="wrap" gap={1}>
@@ -710,6 +385,103 @@ export const register: Register = (on, options) => {
           ))}
         </Box>
         {rhythm !== '' && <Text dimColor>{rhythm}</Text>}
+        <Box key={byHour ? 'trend-hours' : 'trend-days'} flexDirection="column">
+          <Text dimColor>{trendTitle}</Text>
+          <Text>{sparkline(trendBuckets, trendW, Math.max(...trendBuckets))}</Text>
+          <Box flexDirection="row" justifyContent="space-between" width={trendW}>
+            <Text dimColor>{axis[0]}</Text>
+            <Text dimColor>{axis[1]}</Text>
+          </Box>
+        </Box>
+      </Box>
+    )
+
+    // Top projects get a colored card each; the rest fold into one gray "Other" card
+    const topN = ranked.length > PALETTE.length + 1 ? PALETTE.length : ranked.length
+    const top = ranked.slice(0, topN)
+    const rest = ranked.slice(topN)
+    const restTotal = emptyProject()
+    for (const [, p] of rest) merge(restTotal, p)
+    const cards = [
+      ...top.map(([name, p], i) => ({ key: name, label: name, color: PALETTE[i] ?? OTHER, p, names: [name] })),
+      ...(rest.length > 0
+        ? [{ key: 'other', label: `Other (${rest.length})`, color: OTHER, p: restTotal, names: rest.map(([n]) => n) }]
+        : []),
+    ]
+    const perRow = Math.max(1, Math.floor((cols - 4 + 1) / (CARD_W + 1)))
+    const cardW = Math.max(20, Math.floor((cols - 4 - (perRow - 1)) / perRow))
+    const inner = cardW - 4
+    const cardBuckets = cards.map(c => resample(seriesOf(c.names), inner))
+    const cardMax = Math.max(...cardBuckets.flat())
+
+    const projects = (
+      <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        {cards.map((c, i) => {
+          const value = metricOf(c.p, v.metric)
+          return (
+            <Box key={`card-${c.key}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1} width={cardW}>
+              <Box flexDirection="row">
+                <Text color={c.color}>● </Text>
+                <Text bold>{clip(c.label, inner - 2)}</Text>
+              </Box>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text bold>{fmtMetric(value, v.metric)}</Text>
+                <Text dimColor>{pctOf(value, grand)}%</Text>
+              </Box>
+              <Text dimColor>{`${plural(c.p.turns, 'turn')}, ${plural(c.p.sessions.length, 'session')}`}</Text>
+              <Text color={c.color}>{sparkline(cardBuckets[i] ?? [], inner, cardMax)}</Text>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text dimColor>{axis[0]}</Text>
+                <Text dimColor>{axis[1]}</Text>
+              </Box>
+            </Box>
+          )
+        })}
+      </Box>
+    )
+
+    const statRows = ranked.map(([name, p]) => [
+      name,
+      fmtDuration(p.activeMs),
+      `${pctOf(p.activeMs, all.activeMs)}%`,
+      fmtCount(p.turns),
+      fmtCount(p.tokens),
+      fmtCount(p.tools),
+      String(p.sessions.length),
+      p.activeMs > 0 ? hourLabel(peakHour(p.hours)) : '-',
+    ])
+    const statNameW = Math.min(24, Math.max(8, ...ranked.map(([n]) => n.length)) + 1)
+    const stats = (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          {STAT_COLUMNS.map((c, i) => (
+            <Box key={`col-${c.id}`} width={i === 0 ? statNameW : 9} justifyContent={i === 0 ? 'flex-start' : 'flex-end'}>
+              <Text bold underline>{c.label}</Text>
+              <Box
+                position="absolute"
+                top={1}
+                {...(i < STAT_COLUMNS.length / 2 ? { left: 0 } : { right: 0 })}
+                width={34}
+                display="none"
+                hover={{ display: 'flex' }}
+                backgroundColor={TIP_BG}
+                paddingX={1}
+              >
+                <Text color={TIP_FG} wrap="wrap">{c.tip}</Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+        {statRows.map(row => (
+          <Box key={`stat-${row[0]}`} flexDirection="row">
+            {row.map((cell, i) => (
+              <Box key={`stat-${row[0]}-${i}`} width={i === 0 ? statNameW : 9} justifyContent={i === 0 ? 'flex-start' : 'flex-end'}>
+                <Text dimColor={i > 0 && cell === '-'}>{i === 0 ? clip(cell, statNameW - 1) : cell}</Text>
+              </Box>
+            ))}
+          </Box>
+        ))}
+        <Text dimColor>Hover a column name for its meaning</Text>
       </Box>
     )
 
@@ -717,25 +489,8 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap={1}>
         {header}
         {section('summary', 'Summary', summary)}
-        {section(
-          'share',
-          shareTitle,
-          <Svg
-            source={shareSvg(shareRows, w, cls, v.metric)}
-            alt={shareRows.map(r => `${r.name} ${fmtMetric(r.value, v.metric)} (${r.pct}%)`).join(', ')}
-            isInteractive
-          />,
-        )}
-        {section(
-          byHour ? 'hours' : 'days',
-          columnsTitle,
-          <Svg
-            source={columnsSvg(columns, order, w, cls, columnsFmt, labelEvery, byHour || v.metric === 'time')}
-            alt={columns.map(c => `${c.label} ${columnsFmt(c.parts.reduce((s, p) => s + p.value, 0))}`).join(', ')}
-            isInteractive
-          />,
-        )}
-        {section('stats', 'Stats by project', statsTable(Box, Text))}
+        {section('projects', `${metricLabel} by project`, projects)}
+        {section('stats', 'Stats by project', stats)}
       </Box>
     )
   })

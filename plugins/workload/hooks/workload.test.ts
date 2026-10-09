@@ -64,9 +64,9 @@ test('records a turn under its project', async ($, on) => {
   await $.turn.complete(turn(45 * 60_000))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ key: 'kpi-active' })).toMatchObject({ text: '45m active' })
-  expect(await ui.find({ key: 'kpi-tokens' })).toMatchObject({ text: '1.0k tokens' })
-  expect(await ui.find({ key: 'kpi-tool calls' })).toMatchObject({ text: '2 tool calls' })
+  expect(await ui.find({ key: 'kpi-active' })).toMatchObject({ text: expect.stringMatching(/45m\s*active/) })
+  expect(await ui.find({ key: 'kpi-tokens' })).toMatchObject({ text: expect.stringMatching(/1\.0k\s*tokens/) })
+  expect(await ui.find({ key: 'kpi-tool calls' })).toMatchObject({ text: expect.stringMatching(/2\s*tool calls/) })
   expect(await ui.find({ text: /First activity 09h, last 10h, peak 10h/ })).toBeDefined()
   expect(await ui.find({ text: /alpha/ })).toBeDefined()
 })
@@ -83,15 +83,10 @@ test('draws the pane on every surface', async ($, on) => {
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ text: /Share of time by project/ })).toBeDefined()
+    expect(await ui.find({ text: /Time by project/ })).toBeDefined()
     expect(await ui.find({ key: 'kpi-active' })).toBeDefined()
-    if (surface === 'terminal') {
-      expect(await ui.find({ key: 'share-alpha' })).toMatchObject({ text: expect.stringMatching(/alpha.*1h00.*67%/) })
-    } else {
-      const charts = await ui.findAll({ type: 'Svg' })
-      expect(charts).toHaveLength(2)
-      expect(String(charts[0]?.props.alt)).toContain('alpha 1h00 (67%)')
-    }
+    expect(await ui.find({ key: 'card-alpha' })).toMatchObject({ text: expect.stringMatching(/alpha.*1h00.*67%.*4 turns, 1 session/) })
+    expect(await ui.find({ key: 'card-beta' })).toMatchObject({ text: expect.stringMatching(/beta.*30m.*33%/) })
 
     const timeColumn = await ui.find({ key: 'col-time' })
     expect(timeColumn?.text).toContain('Time')
@@ -99,8 +94,8 @@ test('draws the pane on every surface', async ($, on) => {
     expect(await ui.find({ key: 'stat-alpha' })).toMatchObject({ text: expect.stringMatching(/alpha.*1h00.*67%/) })
 
     expect(await ui.find({ text: /daily split/i })).toBeDefined()
-    expect(await ui.find({ key: 'hours' })).toBeDefined()
-    expect(await ui.find({ key: 'days' })).toBeUndefined()
+    expect(await ui.find({ key: 'trend-hours' })).toMatchObject({ text: expect.stringMatching(/Working time by hour.*04h.*09h/) })
+    expect(await ui.find({ key: 'trend-days' })).toBeUndefined()
 
     await ui.press({ key: 'range-week' })
     expect(await ui.find({ text: /weekly split/i })).toBeDefined()
@@ -109,11 +104,11 @@ test('draws the pane on every surface', async ($, on) => {
     expect(await ui.find({ key: 'next' })).toBeDefined()
     await ui.press({ key: 'next' })
     expect(await ui.find({ key: 'next' })).toBeUndefined()
-    expect(await ui.find({ key: 'days' })).toBeDefined()
-    expect(await ui.find({ key: 'hours' })).toBeUndefined()
-    expect(await ui.find({ text: /Time by day/ })).toBeDefined()
+    expect(await ui.find({ key: 'trend-days' })).toMatchObject({ text: expect.stringMatching(/Time by day/) })
+    expect(await ui.find({ key: 'trend-hours' })).toBeUndefined()
     await ui.press({ key: 'metric-tokens' })
     expect(await ui.find({ text: /Tokens by day/ })).toBeDefined()
+    expect(await ui.find({ key: 'card-alpha' })).toMatchObject({ text: expect.stringMatching(/5\.0k.*83%/) })
     await ui.press({ key: 'metric-time' })
     await ui.press({ key: 'range-day' })
     await ui.unmount()
@@ -125,4 +120,19 @@ test('says so when nothing was recorded', async ($, on) => {
   session(on, '/home/me/workspaces/alpha')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ text: /No activity/ })).toBeDefined()
+})
+
+test('folds small projects into an Other card', async ($, on) => {
+  const hours = Array.from({ length: 24 }, (_, h) => (h === 10 ? 60_000 : 0))
+  const log: Record<string, unknown> = {}
+  for (let i = 0; i < 9; i++) {
+    log[`p${i}`] = { activeMs: (10 - i) * 60_000, turns: 1, tokens: 1, tools: 1, sessions: [`s${i}`], hours }
+  }
+  mock.store(on, { [TODAY]: log })
+  session(on, '/home/me/workspaces/p0')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'card-p5' })).toBeDefined()
+  expect(await ui.find({ key: 'card-p6' })).toBeUndefined()
+  expect(await ui.find({ key: 'card-other' })).toMatchObject({ text: expect.stringMatching(/Other \(3\)/) })
+  expect(await ui.find({ key: 'stat-p8' })).toBeDefined()
 })

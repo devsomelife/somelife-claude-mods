@@ -6,7 +6,7 @@ Tracks how much Claude works on each of your projects, across every session, and
 | --- | --- |
 | Use | `/some-workload` opens the pane |
 | Records | Claude's working time per project and hour, turns, tokens, tool calls, sessions |
-| Views | Daily, weekly and 30-day split, by time, tokens, turns or tools |
+| Views | Daily, weekly and 30-day split, one card per project, by time, tokens, turns or tools |
 | Changes Claude's behaviour | No, it only records and displays |
 | Settings | `retentionDays`: days of history kept (120) |
 
@@ -23,18 +23,17 @@ Tracks how much Claude works on each of your projects, across every session, and
 
 ## Pane
 
-Three modes, picked from the tab row at the top: **Daily split**, **Weekly split**, **30-day split**. The mode's title and period sit under the tabs, then one framed section per block:
+Three modes, picked from the tab row at the top: **Daily split**, **Weekly split**, **30-day split**. The mode's title and period sit under the tabs, then three framed sections:
 
-| Section | Daily split | Weekly and 30-day split |
-| --- | --- | --- |
-| Summary | Active time, turns, tokens, tool calls, sessions, projects, first, last and peak hour | Same, over the period |
-| Share by project | One bar per project, value and percentage for the chosen metric | Same |
-| Chart | Active time by hour, one stacked column per hour | Chosen metric by day, one stacked column per day |
-| Stats by project | Time, share, turns, tokens, tool calls, sessions, peak hour; hover a column name for its meaning | Same |
+| Section | Content |
+| --- | --- |
+| Summary | Working time, turns, tokens, tool calls, sessions, projects, first, last and peak hour, and one bar line of the load over the period |
+| By project | One card per project: value and share for the chosen metric, turns, sessions, and a bar line of its load |
+| Stats by project | Every project with time, share, turns, tokens, tool calls, sessions, peak hour; hover a column name for its meaning |
 
-- Desktop app: SVG charts with hover tooltips, following the light or dark theme
-- Terminal: text bars, an hour-by-project heatmap and the same stats table
-- Each project keeps its color everywhere, from the first time it is recorded; past 8 projects, the extra ones share a gray
+- Bar lines run over the active hours in the daily split, over the days in the weekly and 30-day splits
+- The 6 biggest projects get a colored card each; the rest share one gray "Other" card, and still have their own row in the stats table
+- Plain text and colored blocks only, so the pane follows the light or dark theme in the desktop app and in the terminal
 
 Controls (hotkeys work once the pane has focus):
 
