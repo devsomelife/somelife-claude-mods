@@ -2,6 +2,13 @@
 
 Claude's tools randomly go on strike, for far-fetched and very French reasons.
 
+| | |
+| --- | --- |
+| Use | Nothing to run: strikes happen on their own |
+| Effect | A tool call is refused with a French strike notice and a toast; Claude retries |
+| Changes Claude's behaviour | Yes, refused tool calls do not run |
+| Settings | `chance`: percentage of tool calls that strike (5.8) |
+
 ## Behaviour
 
 - On each tool call, a configurable chance that the tool refuses to work

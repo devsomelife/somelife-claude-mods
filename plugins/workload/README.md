@@ -2,6 +2,14 @@
 
 Tracks how much Claude works on each of your projects, across every session, and charts the load of a day, a week or 30 days in a pane.
 
+| | |
+| --- | --- |
+| Use | `/workload` opens the pane |
+| Records | Claude's working time per project and hour, turns, tokens, tool calls, sessions |
+| Views | Daily, weekly and 30-day split, by time, tokens, turns or tools |
+| Changes Claude's behaviour | No, it only records and displays |
+| Settings | `retentionDays`: days of history kept (120) |
+
 ## Behaviour
 
 - Global: every session with the mod installed writes to the same history, whatever the project
