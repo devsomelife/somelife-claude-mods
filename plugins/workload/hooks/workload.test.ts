@@ -93,12 +93,22 @@ test('draws the pane on every surface', async ($, on) => {
       expect(String(charts[0]?.props.alt)).toContain('alpha 1h00 (67%)')
     }
 
+    const timeColumn = await ui.find({ key: 'col-time' })
+    expect(timeColumn?.text).toContain('Time')
+    expect(timeColumn?.text).toContain("Claude's working time")
+    expect(await ui.find({ key: 'stat-alpha' })).toMatchObject({ text: expect.stringMatching(/alpha.*1h00.*67%/) })
+
     expect(await ui.find({ text: /daily split/i })).toBeDefined()
     expect(await ui.find({ key: 'hours' })).toBeDefined()
     expect(await ui.find({ key: 'days' })).toBeUndefined()
 
     await ui.press({ key: 'range-week' })
     expect(await ui.find({ text: /weekly split/i })).toBeDefined()
+    expect(await ui.find({ key: 'next' })).toBeUndefined()
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ key: 'next' })).toBeDefined()
+    await ui.press({ key: 'next' })
+    expect(await ui.find({ key: 'next' })).toBeUndefined()
     expect(await ui.find({ key: 'days' })).toBeDefined()
     expect(await ui.find({ key: 'hours' })).toBeUndefined()
     expect(await ui.find({ text: /Time by day/ })).toBeDefined()

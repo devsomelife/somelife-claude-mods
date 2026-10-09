@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren, TurnCompleteInput } from 'claude-code'
+import type { BoxProps, ElementConstructor, EngineInterface, Register, RenderChildren, TextProps, TurnCompleteInput } from 'claude-code'
 
 import type { WorkloadMetric, WorkloadRange, WorkloadView } from '../types'
 
@@ -35,6 +35,20 @@ const RANGES: { id: WorkloadRange; label: string; hotkey: string }[] = [
   { id: 'week', label: 'Week', hotkey: 'w' },
   { id: 'month', label: '30 days', hotkey: 'm' },
 ]
+
+// Stats table columns; `tip` is the hover explanation of the column name
+const STAT_COLUMNS: { id: string; label: string; tip: string }[] = [
+  { id: 'project', label: 'Project', tip: 'Git repository root folder name, or the session folder outside git' },
+  { id: 'time', label: 'Time', tip: "Claude's working time: wall-clock length of main conversation turns, waits for permission prompts included. Not your own time." },
+  { id: 'share', label: 'Share', tip: "This project's part of the period's total working time" },
+  { id: 'turns', label: 'Turns', tip: 'Prompts Claude answered in the main conversation' },
+  { id: 'tokens', label: 'Tokens', tip: 'Input, output and cache tokens, subagents included' },
+  { id: 'tools', label: 'Tools', tip: 'Tool calls made by Claude and its subagents' },
+  { id: 'sessions', label: 'Sessions', tip: 'Distinct Claude Code sessions with at least one turn on this project' },
+  { id: 'peak', label: 'Peak', tip: 'Hour of the day with the most working time' },
+]
+const TIP_BG = '#2b2b29'
+const TIP_FG = '#f2f1ec'
 
 // Validated categorical palette, one fixed slot per project; past 8, projects share "other"
 const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
@@ -450,14 +464,52 @@ export const register: Register = (on, options) => {
     const columnsFmt = (n: number) => (byHour ? fmtDuration(n) : fmtMetric(n, v.metric))
     const shareTitle = `Share of ${(METRICS.find(m => m.id === v.metric)?.label ?? '').toLowerCase()} by project`
 
-    const table = [
-      '| Project | Time | Share | Turns | Tokens | Tools | Sessions | Peak |',
-      '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
-      ...ranked.map(
-        ([name, p]) =>
-          `| ${name.replace(/\|/g, '\\|')} | ${fmtDuration(p.activeMs)} | ${pctOf(p.activeMs, all.activeMs)}% | ${fmtCount(p.turns)} | ${fmtCount(p.tokens)} | ${fmtCount(p.tools)} | ${p.sessions.length} | ${p.activeMs > 0 ? hourLabel(peakHour(p.hours)) : '-'} |`,
-      ),
-    ].join('\n')
+    const statRows = ranked.map(([name, p]) => [
+      name,
+      fmtDuration(p.activeMs),
+      `${pctOf(p.activeMs, all.activeMs)}%`,
+      fmtCount(p.turns),
+      fmtCount(p.tokens),
+      fmtCount(p.tools),
+      String(p.sessions.length),
+      p.activeMs > 0 ? hourLabel(peakHour(p.hours)) : '-',
+    ])
+    const statNameW = Math.min(24, Math.max(8, ...order.map(n => n.length)) + 1)
+
+    // A table whose column names reveal their explanation on hover
+    const statsTable = (Box: ElementConstructor<BoxProps>, Text: ElementConstructor<TextProps>) => (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          {STAT_COLUMNS.map((c, i) => (
+            <Box key={`col-${c.id}`} width={i === 0 ? statNameW : 9} justifyContent={i === 0 ? 'flex-start' : 'flex-end'}>
+              <Text bold underline>{c.label}</Text>
+              <Box
+                position="absolute"
+                top={1}
+                {...(i < STAT_COLUMNS.length / 2 ? { left: 0 } : { right: 0 })}
+                width={34}
+                display="none"
+                hover={{ display: 'flex' }}
+                backgroundColor={TIP_BG}
+                paddingX={1}
+              >
+                <Text color={TIP_FG} wrap="wrap">{c.tip}</Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+        {statRows.map(row => (
+          <Box key={`stat-${row[0]}`} flexDirection="row">
+            {row.map((cell, i) => (
+              <Box key={`stat-${row[0]}-${i}`} width={i === 0 ? statNameW : 9} justifyContent={i === 0 ? 'flex-start' : 'flex-end'}>
+                <Text dimColor={i > 0 && cell === '-'}>{i === 0 ? clip(cell, statNameW - 1) : cell}</Text>
+              </Box>
+            ))}
+          </Box>
+        ))}
+        <Text dimColor>Hover a column name for its meaning</Text>
+      </Box>
+    )
 
     const projectOptions = [
       { value: ALL, label: 'All projects' },
@@ -465,7 +517,7 @@ export const register: Register = (on, options) => {
     ]
 
     if (e.surface === 'terminal') {
-      const { Box, Text, Button, Select, Markdown } = $.ui.resolve(e)
+      const { Box, Text, Button, Select } = $.ui.resolve(e)
       const colorOf = (name: string) => SERIES_LIGHT[slotOf(name)] ?? OTHER_LIGHT
       const section = (key: string, title: string, body: RenderChildren) => (
         <Box key={key} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
@@ -489,7 +541,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="row" gap={1} flexWrap="wrap">
               <Button key="prev" label={`Prev ${mode.unit}`} hotkey="h" onPress={set({ offset: v.offset + 1 })} />
               <Button key="current" label={mode.current} hotkey="t" onPress={set({ offset: 0 })} />
-              <Button key="next" label={`Next ${mode.unit}`} hotkey="l" onPress={set({ offset: Math.max(0, v.offset - 1) })} />
+              {v.offset > 0 && <Button key="next" label={`Next ${mode.unit}`} hotkey="l" onPress={set({ offset: Math.max(0, v.offset - 1) })} />}
             </Box>
             <Box flexDirection="row" gap={1} flexWrap="wrap">
               {METRICS.map(m => (
@@ -590,13 +642,13 @@ export const register: Register = (on, options) => {
           {section('summary', 'Summary', summary)}
           {section('share', shareTitle, share)}
           {byHour ? section('hours', columnsTitle, heatmap) : section('days', columnsTitle, dailyBars)}
-          {section('stats', 'Stats by project', <Markdown text={table} />)}
+          {section('stats', 'Stats by project', statsTable(Box, Text))}
         </Box>
       )
     }
 
     const els = $.ui.resolve(e)
-    const { Box, Text, Button, Svg, Markdown } = els
+    const { Box, Text, Button, Svg } = els
     const Select = 'Select' in els ? els.Select : undefined
     const cls = (name: string) => (slotOf(name) >= 0 ? `s${slotOf(name)}` : 'so')
     const w = Math.max(260, Math.min(740, (cols - 4) * 8))
@@ -621,7 +673,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
           <Button key="prev" label={`Prev ${mode.unit}`} hotkey="h" variant="secondary" onPress={set({ offset: v.offset + 1 })} />
           <Button key="current" label={mode.current} hotkey="t" variant="secondary" onPress={set({ offset: 0 })} />
-          <Button key="next" label={`Next ${mode.unit}`} hotkey="l" variant="secondary" onPress={set({ offset: Math.max(0, v.offset - 1) })} />
+          {v.offset > 0 && <Button key="next" label={`Next ${mode.unit}`} hotkey="l" variant="secondary" onPress={set({ offset: Math.max(0, v.offset - 1) })} />}
         </Box>
         <Box flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
           {METRICS.map(m => (
@@ -683,7 +735,7 @@ export const register: Register = (on, options) => {
             isInteractive
           />,
         )}
-        {section('stats', 'Stats by project', <Markdown text={table} />)}
+        {section('stats', 'Stats by project', statsTable(Box, Text))}
       </Box>
     )
   })

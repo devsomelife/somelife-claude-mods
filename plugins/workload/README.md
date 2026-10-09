@@ -22,7 +22,7 @@ Three modes, picked from the tab row at the top: **Daily split**, **Weekly split
 | Summary | Active time, turns, tokens, tool calls, sessions, projects, first, last and peak hour | Same, over the period |
 | Share by project | One bar per project, value and percentage for the chosen metric | Same |
 | Chart | Active time by hour, one stacked column per hour | Chosen metric by day, one stacked column per day |
-| Stats by project | Time, share, turns, tokens, tool calls, sessions, peak hour | Same |
+| Stats by project | Time, share, turns, tokens, tool calls, sessions, peak hour; hover a column name for its meaning | Same |
 
 - Desktop app: SVG charts with hover tooltips, following the light or dark theme
 - Terminal: text bars, an hour-by-project heatmap and the same stats table
@@ -32,7 +32,8 @@ Controls (hotkeys work once the pane has focus):
 
 | Control | Hotkey |
 | --- | --- |
-| Previous / next day or week, back to the current one | `h` / `l` / `t` |
+| Previous day or week, back to the current one | `h` / `t` |
+| Next day or week, shown only on a past period | `l` |
 | Daily, weekly, 30-day split | `d` / `w` / `m` |
 | Metric: time, tokens, turns, tools | `1` / `2` / `3` / `4` |
 | Show one project only | project picker |
