@@ -114,7 +114,7 @@ Subagent rows carry `(subagent)` after the source.
 - Acronyms (`HIV`, `AIDS`, `ADHD`, `IVG`) match in capitals only, so "this aids the reader" is skipped
 - "diagnostic" and "diagnostics" are skipped (too common in code); "diagnosis" and "diagnosed with" are kept
 - Health terms flag a topic, not a person: a README about a diabetes app will show up
-- The mod's own `hooks/detect.ts` holds the whole term list: add `plugins/leaks/hooks` to `ignore` when working on this repository
+- The mod's own `hooks/detect.ts` holds the whole term list: `plugins/leaks/hooks` is in the default `ignore`, so reading the mod's sources is not flagged, and in `redact` mode they reach the model whole
 
 ## Pane
 
@@ -135,7 +135,7 @@ Each occurrence says what was done with it: `seen`, `redacted` or `blocked`. The
 | `mode` | `redact`, `notify`, `block` | `redact` | What happens to data found: replaced by placeholders, recorded only, or withheld |
 | `notify` | `toast`, `system`, `both`, `off` | `toast` | How a new finding is announced |
 | `storeRawValues` | boolean | `false` | Keep full values in the history instead of masked ones |
-| `ignore` | string | `example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com` | Comma-separated texts; a finding whose value or source contains one is skipped |
+| `ignore` | string | `example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks` | Comma-separated texts; a finding whose value or source contains one is skipped |
 | `retentionDays` | number | `90` | Days of occurrences kept; older ones are deleted when a session starts |
 
 Change them, then restart Claude Code:

@@ -304,6 +304,8 @@ async function prune($: EngineInterface, retentionDays: number) {
 }
 
 const MODES: readonly Mode[] = ['notify', 'redact', 'block']
+// The mod's own sources hold the term list, which would flag on every read
+const DEFAULT_IGNORE = 'example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks'
 
 export const register: Register = (on, options) => {
   const retentionDays = typeof options.retentionDays === 'number' ? options.retentionDays : 90
@@ -311,7 +313,7 @@ export const register: Register = (on, options) => {
     mode: MODES.find(m => m === options.mode) ?? 'redact',
     notify: typeof options.notify === 'string' ? options.notify : 'toast',
     storeRaw: options.storeRawValues === true,
-    ignore: (typeof options.ignore === 'string' ? options.ignore : '')
+    ignore: (typeof options.ignore === 'string' ? options.ignore : DEFAULT_IGNORE)
       .split(',')
       .map(s => s.trim().toLowerCase())
       .filter(s => s !== ''),

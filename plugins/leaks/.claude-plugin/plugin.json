@@ -1,6 +1,6 @@
 {
   "name": "leaks",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Notices private and medical data that reaches the model, lists it per project, and can redact or block it",
   "author": {
     "name": "Greg",
@@ -41,7 +41,7 @@
       "type": "string",
       "title": "Ignore list",
       "description": "Comma-separated texts: a finding whose value or source contains one is skipped",
-      "default": "example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com"
+      "default": "example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks"
     },
     "retentionDays": {
       "type": "number",
