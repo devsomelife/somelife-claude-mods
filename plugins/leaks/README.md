@@ -1,6 +1,6 @@
 # leaks
 
-Watches everything the model reads or writes for private and medical data. By default nothing is blocked: you get a notification, and each project keeps a list of what was seen, when and through which source. Two stricter modes redact or withhold the data before it leaves your machine.
+Watches everything the model reads or writes for private and medical data. By default each value is replaced by a placeholder before it leaves your machine; you get a notification, and each project keeps a list of what was found, when and through which source. Two other modes only record it, or withhold the whole content.
 
 | | |
 | --- | --- |
@@ -8,8 +8,8 @@ Watches everything the model reads or writes for private and medical data. By de
 | Watches | Your prompts, tool results, files and context added to the conversation, the model's replies and tool inputs, subagents, other mods' side model calls |
 | Detects | Emails, phone numbers, IBANs, card numbers, French social security numbers, US SSNs, dates of birth, health terms |
 | Notifies | Once per value and session, by toast, system notification, both or off |
-| Modes | `notify` (default), `redact`, `block` |
-| Changes Claude's behaviour | No in `notify` mode; `redact` and `block` change what the model reads |
+| Modes | `redact` (default), `notify`, `block` |
+| Changes Claude's behaviour | Yes by default: `redact` and `block` change what the model reads; `notify` changes nothing |
 | Settings | `mode`, `notify`, `storeRawValues`, `ignore`, `retentionDays` |
 
 ## Behaviour
@@ -23,14 +23,14 @@ Watches everything the model reads or writes for private and medical data. By de
 - A value seen again in the same session is counted, not notified again
 - A status line keeps the number of sensitive items seen this session
 
-**Changes Claude's behaviour:** no in `notify` mode. In `redact` and `block` modes the model reads placeholders or a withheld notice instead of the data, and some prompts and writes are refused. Every such change is notified and listed in the pane.
+**Changes Claude's behaviour:** yes by default. In `redact` (the default) and `block` modes the model reads placeholders or a withheld notice instead of the data, and some prompts and writes are refused. Every such change is notified and listed in the pane. In `notify` mode nothing is changed.
 
 ## Modes
 
 | Mode | Prompts | Tool results and context | Side model calls | What reaches the API |
 | --- | --- | --- | --- | --- |
+| `redact` (default) | Values replaced by `[redacted:<kind>]` | Values replaced by `[redacted:<kind>]` | Values replaced | Placeholders only |
 | `notify` | Sent as typed | Kept as read | Sent as written | Everything |
-| `redact` | Values replaced by `[redacted:<kind>]` | Values replaced by `[redacted:<kind>]` | Values replaced | Placeholders only |
 | `block` | Refused, put back in the prompt box with the values underlined | Whole content replaced by a withheld notice | Refused | A notice naming the kinds found |
 
 - The model's own replies and tool inputs are recorded, never rewritten: they come from the API, not from your machine
@@ -132,7 +132,7 @@ Each occurrence says what was done with it: `seen`, `redacted` or `blocked`. The
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `mode` | `notify`, `redact`, `block` | `notify` | What happens to data found: recorded only, replaced by placeholders, or withheld |
+| `mode` | `redact`, `notify`, `block` | `redact` | What happens to data found: replaced by placeholders, recorded only, or withheld |
 | `notify` | `toast`, `system`, `both`, `off` | `toast` | How a new finding is announced |
 | `storeRawValues` | boolean | `false` | Keep full values in the history instead of masked ones |
 | `ignore` | string | `example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com` | Comma-separated texts; a finding whose value or source contains one is skipped |
@@ -141,7 +141,7 @@ Each occurrence says what was done with it: `seen`, `redacted` or `blocked`. The
 Change them, then restart Claude Code:
 
 ```bash
-echo '{"mode":"redact","notify":"both","ignore":"example.com,mycompany.com"}' | claude plugin configure leaks@somelife-claude-mods --values-stdin
+echo '{"mode":"notify","notify":"both","ignore":"example.com,mycompany.com"}' | claude plugin configure leaks@somelife-claude-mods --values-stdin
 ```
 
 ## Trying It
@@ -154,14 +154,15 @@ claude --plugin-dir plugins/leaks
 
 | Step | Do | Expect |
 | --- | --- | --- |
-| 1 | Send `My email is jane.doe@gmail.com and I was diagnosed with diabetes. Just reply OK.` | A "Sensitive data seen" toast, the status line counting items |
-| 2 | Ask `Read plugins/leaks/fixtures/patients.csv and tell me how many rows it has` | A toast naming `Read plugins/leaks/fixtures/patients.csv` |
-| 3 | Run `/some-leaks` | Emails, phones, IBAN, dates of birth and health terms, each `seen` |
-| 4 | In `/config`, set the leaks `mode` to `redact`, then ask Claude to read the file and quote its emails | Claude only sees `[redacted:email]` |
-| 5 | Ask Claude to write that content back to the file | The write is refused |
-| 6 | Set `mode` to `block`, then send a prompt holding `4111 1111 1111 1111` | The prompt is refused and put back in the box, the number underlined |
+| 1 | Send `My email is jane.doe@gmail.com and I was diagnosed with diabetes. Just reply OK.` | A "Sensitive data redacted" toast; Claude reads `My email is [redacted:email] and I was [redacted:health] [redacted:health]` |
+| 2 | Ask `Read plugins/leaks/fixtures/patients.csv and quote its emails` | Claude only sees `[redacted:email]`; the toast names `Read plugins/leaks/fixtures/patients.csv` |
+| 3 | Ask Claude to write that content back to the file | The write is refused |
+| 4 | Run `/some-leaks` | Emails, phones, IBAN, dates of birth and health terms, each `redacted` |
+| 5 | Set `mode` to `notify`, restart, then send the prompt of step 1 | A "Sensitive data seen" toast; Claude reads the prompt as typed |
+| 6 | Set `mode` to `block`, restart, then send a prompt holding `4111 1111 1111 1111` | The prompt is refused and put back in the box, the number underlined |
 | 7 | Ask Claude to read the file | Claude only gets the withheld notice |
 
+- Change `mode` in `/config` inside a session, or with `claude plugin configure leaks@somelife-claude-mods --values-stdin` from a shell, then restart Claude Code
 - A value is notified once per session: later steps count it in the pane without a new toast
 - A dim `leaks:` line in the transcript means a hook failed or the module did not load
 - Automated tests: `claude plugin test plugins/leaks`

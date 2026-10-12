@@ -10,7 +10,7 @@ Mods work in the Claude Code CLI and in the Claude desktop app (Code tab).
 | --- | --- | --- | --- |
 | [greve-generale](plugins/greve-generale/README.md) | fun | Tools randomly go on strike for absurd French reasons | Yes, refuses some tool calls |
 | [workload](plugins/workload/README.md) | productivity | Daily load per project across all sessions, charted in a pane | No, display only |
-| [leaks](plugins/leaks/README.md) | privacy | Notifies when private or medical data reaches the model, listed per project; can redact or block it | No by default; yes in redact and block modes |
+| [leaks](plugins/leaks/README.md) | privacy | Redacts private and medical data before it reaches the model, notifies and lists it per project; can also only notify, or block | Yes by default, redacts data; no in notify mode |
 
 ## Installation
 

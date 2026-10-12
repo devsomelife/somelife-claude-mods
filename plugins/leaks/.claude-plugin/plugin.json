@@ -1,6 +1,6 @@
 {
   "name": "leaks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Notices private and medical data that reaches the model, lists it per project, and can redact or block it",
   "author": {
     "name": "Greg",
@@ -11,13 +11,13 @@
     "mode": {
       "type": "string",
       "title": "Mode",
-      "description": "notify: record and notify only; redact: replace each value with a placeholder before the model reads it; block: withhold content and refuse prompts that hold such data",
+      "description": "redact (default): replace each value with a placeholder before the model reads it; notify: record and notify only; block: withhold content and refuse prompts that hold such data",
       "options": [
-        "notify",
         "redact",
+        "notify",
         "block"
       ],
-      "default": "notify"
+      "default": "redact"
     },
     "notify": {
       "type": "string",

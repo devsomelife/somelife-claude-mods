@@ -98,7 +98,7 @@ test('finds medical terms, not lookalikes', () => {
   expect(detect('jane@example.com', ['example.com'])).toEqual([])
 })
 
-test('records a tool result under its project and source', async ($, on) => {
+test('records a tool result under its project and source', { options: { mode: 'notify' } }, async ($, on) => {
   mock.store(on)
   const { toasts, settle } = session(on)
   await $.session.start(START)
@@ -118,7 +118,7 @@ test('records a tool result under its project and source', async ($, on) => {
   expect(await ui.find({ text: /Read by a tool: Read data\/patients\.csv/ })).toBeDefined()
 })
 
-test('notifies once per session, counts every occurrence', async ($, on) => {
+test('notifies once per session, counts every occurrence', { options: { mode: 'notify' } }, async ($, on) => {
   mock.store(on)
   const { toasts, settle } = session(on)
   await $.session.start(START)
@@ -142,7 +142,7 @@ test('notifies once per session, counts every occurrence', async ($, on) => {
   }
 })
 
-test('clears a project after confirmation', async ($, on) => {
+test('clears a project after confirmation', { options: { mode: 'notify' } }, async ($, on) => {
   mock.store(on)
   const { settle } = session(on)
   await $.session.start(START)
@@ -154,7 +154,7 @@ test('clears a project after confirmation', async ($, on) => {
   expect(await ui.find({ text: /Nothing seen yet/ })).toBeDefined()
 })
 
-test('skips notices the model never reads', async ($, on) => {
+test('skips notices the model never reads', { options: { mode: 'notify' } }, async ($, on) => {
   mock.store(on)
   const { toasts, settle } = session(on)
   await $.session.start(START)
@@ -168,7 +168,7 @@ test('skips notices the model never reads', async ($, on) => {
   expect(toasts).toHaveLength(0)
 })
 
-test('stores findings after the row, not while it is appended', async ($, on) => {
+test('stores findings after the row, not while it is appended', { options: { mode: 'notify' } }, async ($, on) => {
   mock.store(on)
   const { toasts, settle } = session(on)
   await $.session.start(START)
@@ -183,7 +183,7 @@ test('stores findings after the row, not while it is appended', async ($, on) =>
   expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/2 private, 0 medical, 2 occurrences/) })
 })
 
-test('writes what is waiting when the session ends', async ($, on) => {
+test('writes what is waiting when the session ends', { options: { mode: 'notify' } }, async ($, on) => {
   mock.store(on)
   session(on)
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -213,6 +213,14 @@ test('redact mode replaces values before the model reads them', { options: { mod
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ text: /Mode: redact/ })).toBeDefined()
   expect(await ui.find({ text: /Read data\/patients\.csv, redacted/ })).toBeDefined()
+})
+
+test('redact is the default mode', async ($, on) => {
+  mock.store(on)
+  const { rows } = session(on)
+  await $.session.start(START)
+  await $.session.append(prompt('call me on 06 12 34 56 78'))
+  expect(keptText(rows, 'row-prompt')).toContain('call me on [redacted:phone]')
 })
 
 test('redact mode refuses to write placeholders back', { options: { mode: 'redact' } }, async ($, on) => {

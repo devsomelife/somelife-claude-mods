@@ -308,7 +308,7 @@ const MODES: readonly Mode[] = ['notify', 'redact', 'block']
 export const register: Register = (on, options) => {
   const retentionDays = typeof options.retentionDays === 'number' ? options.retentionDays : 90
   const settings: Settings = {
-    mode: MODES.find(m => m === options.mode) ?? 'notify',
+    mode: MODES.find(m => m === options.mode) ?? 'redact',
     notify: typeof options.notify === 'string' ? options.notify : 'toast',
     storeRaw: options.storeRawValues === true,
     ignore: (typeof options.ignore === 'string' ? options.ignore : '')
