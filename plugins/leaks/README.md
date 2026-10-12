@@ -1,0 +1,177 @@
+# leaks
+
+Watches everything the model reads or writes for private and medical data. By default nothing is blocked: you get a notification, and each project keeps a list of what was seen, when and through which source. Two stricter modes redact or withhold the data before it leaves your machine.
+
+| | |
+| --- | --- |
+| Use | `/some-leaks` opens the pane |
+| Watches | Your prompts, tool results, files and context added to the conversation, the model's replies and tool inputs, subagents, other mods' side model calls |
+| Detects | Emails, phone numbers, IBANs, card numbers, French social security numbers, US SSNs, dates of birth, health terms |
+| Notifies | Once per value and session, by toast, system notification, both or off |
+| Modes | `notify` (default), `redact`, `block` |
+| Changes Claude's behaviour | No in `notify` mode; `redact` and `block` change what the model reads |
+| Settings | `mode`, `notify`, `storeRawValues`, `ignore`, `retentionDays` |
+
+## Behaviour
+
+- Every row the conversation keeps is scanned before it is stored, and the API request is built from the row as stored
+- Detection runs locally, inside Claude Code: no model, no remote service, no network call
+- Only the scan runs in the conversation's path (about 0.4 ms for a 20 KB file); findings are stored and notified 250 ms later, off that path, and anything still waiting is written when the session ends
+- Rows the model never reads (notices) and compaction summaries are skipped
+- A project is the git repository's root folder name, or the session folder's name outside git
+- Each distinct value is one finding per project, with its count, first and last time, and its 20 latest occurrences
+- A value seen again in the same session is counted, not notified again
+- A status line keeps the number of sensitive items seen this session
+
+**Changes Claude's behaviour:** no in `notify` mode. In `redact` and `block` modes the model reads placeholders or a withheld notice instead of the data, and some prompts and writes are refused. Every such change is notified and listed in the pane.
+
+## Modes
+
+| Mode | Prompts | Tool results and context | Side model calls | What reaches the API |
+| --- | --- | --- | --- | --- |
+| `notify` | Sent as typed | Kept as read | Sent as written | Everything |
+| `redact` | Values replaced by `[redacted:<kind>]` | Values replaced by `[redacted:<kind>]` | Values replaced | Placeholders only |
+| `block` | Refused, put back in the prompt box with the values underlined | Whole content replaced by a withheld notice | Refused | A notice naming the kinds found |
+
+- The model's own replies and tool inputs are recorded, never rewritten: they come from the API, not from your machine
+- In `redact` mode, `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash` calls whose input holds a placeholder are refused, so the model cannot write placeholders back over the real values
+- `redact` breaks tasks that need the real value, such as editing the lines of a file that hold it
+- `block` stops Claude from working on files that hold such data at all
+- Images and PDFs are not scanned, and some attached context is sent as recorded by the engine
+- The session transcript on disk keeps the tool's original output; it stays on your machine
+- Pattern detection catches known formats only: for data that must never leave, also deny Claude access to those folders with a permission rule
+
+## How It Works
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CC as Claude Code
+    participant Mod as leaks mod
+    participant Tool as Tool
+    participant Store as Local history
+    participant API as Anthropic API
+
+    User->>CC: Prompt
+    CC->>Mod: prompt.submit
+    alt block mode, sensitive data found
+        Mod-->>User: Prompt refused, put back with the values underlined
+    else
+        Mod->>CC: Prompt passes
+        CC->>API: Request
+    end
+    API-->>CC: Tool call, for example Read data/patients.csv
+    CC->>Mod: tool.call
+    alt redact mode, a writing tool with placeholders
+        Mod-->>CC: Call refused
+    else
+        Mod->>Tool: Call passes
+        Tool-->>CC: Result with an email and a diagnosis
+    end
+    CC->>Mod: session.append, the result row
+    Mod->>Mod: Local scan
+    alt notify mode
+        Mod->>CC: Row unchanged
+    else redact mode
+        Mod->>CC: Values replaced by [redacted:kind]
+    else block mode
+        Mod->>CC: Content replaced by a withheld notice
+    end
+    CC->>API: Next request, built from the row as stored
+    Mod-)Store: Findings, masked, 250 ms later
+    Mod-)User: Toast and status line
+```
+
+- `prompt.submit`, `tool.call` and `session.append` all run on your machine, before the request is sent
+- Side model calls from other mods go through `model.complete` and `model.fork` and get the same treatment
+- Subagents append their rows the same way
+
+## Sources
+
+| Source | Shown as |
+| --- | --- |
+| Your prompt | Sent by you: prompt |
+| A tool result | Read by a tool: `Read data/patients.csv`, `Bash cat users.json`, `WebFetch https://...` |
+| The model's reply or tool input | Written by the model: reply, `Write src/seed.ts` |
+| Files mentioned, memory, hook context | Added as context: the attachment type |
+| Another mod's `$.model.complete` or `$.model.fork` | Side model call |
+
+Subagent rows carry `(subagent)` after the source.
+
+## Detection
+
+| Kind | Category | Rule | Shown as |
+| --- | --- | --- | --- |
+| Email | private | Address with a real top-level domain (`logo@2x.png` skipped) | `j***@gmail.com` |
+| Phone | private | French numbers (`06 12 34 56 78`, `+33 ...`), other `+` numbers of 8 to 15 digits | last 2 digits |
+| IBAN | private | Checksum verified | country, key and last 4 |
+| Card number | private | 13 to 19 digits, Luhn verified | last 4 |
+| Social security (FR) | private | NIR with a valid key | first digit and key |
+| SSN (US) | private | `123-45-6789` form, invalid ranges skipped | last 4 |
+| Date of birth | private | A date after "date of birth", "DOB", "born on", "né le", "date de naissance" | year only |
+| Health term | medical | Conditions, treatments, medical records, sick leave, common drugs, ICD-10 codes, in English and French | the term |
+
+- Acronyms (`HIV`, `AIDS`, `ADHD`, `IVG`) match in capitals only, so "this aids the reader" is skipped
+- "diagnostic" and "diagnostics" are skipped (too common in code); "diagnosis" and "diagnosed with" are kept
+- Health terms flag a topic, not a person: a README about a diabetes app will show up
+- The mod's own `hooks/detect.ts` holds the whole term list: add `plugins/leaks/hooks` to `ignore` when working on this repository
+
+## Pane
+
+| Control | Hotkey |
+| --- | --- |
+| Findings: one entry per value, latest first, with count, first and last time, latest source | `f` |
+| Timeline: the 100 latest occurrences, with time and source | `t` |
+| Filter all, private, medical | `a` / `p` / `m` |
+| Another project | project picker |
+| Clear the project's history | "Clear project", then confirm |
+
+Each occurrence says what was done with it: `seen`, `redacted` or `blocked`. The current mode shows under the project name.
+
+## Settings
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `mode` | `notify`, `redact`, `block` | `notify` | What happens to data found: recorded only, replaced by placeholders, or withheld |
+| `notify` | `toast`, `system`, `both`, `off` | `toast` | How a new finding is announced |
+| `storeRawValues` | boolean | `false` | Keep full values in the history instead of masked ones |
+| `ignore` | string | `example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com` | Comma-separated texts; a finding whose value or source contains one is skipped |
+| `retentionDays` | number | `90` | Days of occurrences kept; older ones are deleted when a session starts |
+
+Change them, then restart Claude Code:
+
+```bash
+echo '{"mode":"redact","notify":"both","ignore":"example.com,mycompany.com"}' | claude plugin configure leaks@somelife-claude-mods --values-stdin
+```
+
+## Trying It
+
+`fixtures/patients.csv` holds made-up people with emails, phones, an IBAN, dates of birth and conditions. Start a session with the mod, from the repository root:
+
+```bash
+claude --plugin-dir plugins/leaks
+```
+
+| Step | Do | Expect |
+| --- | --- | --- |
+| 1 | Send `My email is jane.doe@gmail.com and I was diagnosed with diabetes. Just reply OK.` | A "Sensitive data seen" toast, the status line counting items |
+| 2 | Ask `Read plugins/leaks/fixtures/patients.csv and tell me how many rows it has` | A toast naming `Read plugins/leaks/fixtures/patients.csv` |
+| 3 | Run `/some-leaks` | Emails, phones, IBAN, dates of birth and health terms, each `seen` |
+| 4 | In `/config`, set the leaks `mode` to `redact`, then ask Claude to read the file and quote its emails | Claude only sees `[redacted:email]` |
+| 5 | Ask Claude to write that content back to the file | The write is refused |
+| 6 | Set `mode` to `block`, then send a prompt holding `4111 1111 1111 1111` | The prompt is refused and put back in the box, the number underlined |
+| 7 | Ask Claude to read the file | Claude only gets the withheld notice |
+
+- A value is notified once per session: later steps count it in the pane without a new toast
+- A dim `leaks:` line in the transcript means a hook failed or the module did not load
+- Automated tests: `claude plugin test plugins/leaks`
+
+## Data
+
+- Stored in the mod's own store under the Claude Code configuration directory, one entry per project
+- Values are masked before storage unless `storeRawValues` is on
+- A short hash of each value is stored to recognise it again
+- Notifications show masked values only
+- Up to 300 findings per project, the oldest dropped first
+- Nothing leaves your machine
+- Detection is pattern based: expect some false positives, and values written in unusual formats are missed

@@ -1,0 +1,53 @@
+{
+  "name": "leaks",
+  "version": "0.1.0",
+  "description": "Notices private and medical data that reaches the model, lists it per project, and can redact or block it",
+  "author": {
+    "name": "Greg",
+    "email": "dev@somelife.eu"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "notify: record and notify only; redact: replace each value with a placeholder before the model reads it; block: withhold content and refuse prompts that hold such data",
+      "options": [
+        "notify",
+        "redact",
+        "block"
+      ],
+      "default": "notify"
+    },
+    "notify": {
+      "type": "string",
+      "title": "Notification",
+      "description": "How a new finding is announced: toast in Claude Code, system notification, both, or off",
+      "options": [
+        "toast",
+        "system",
+        "both",
+        "off"
+      ],
+      "default": "toast"
+    },
+    "storeRawValues": {
+      "type": "boolean",
+      "title": "Keep full values",
+      "description": "Keep the full values found in the history instead of masked ones",
+      "default": false
+    },
+    "ignore": {
+      "type": "string",
+      "title": "Ignore list",
+      "description": "Comma-separated texts: a finding whose value or source contains one is skipped",
+      "default": "example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com"
+    },
+    "retentionDays": {
+      "type": "number",
+      "title": "History kept (days)",
+      "description": "Days of history kept before older occurrences are deleted",
+      "default": 90
+    }
+  }
+}

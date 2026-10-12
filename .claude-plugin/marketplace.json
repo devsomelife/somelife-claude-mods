@@ -21,6 +21,13 @@
       "description": "Tracks Claude's load across all your projects and charts it in a pane",
       "version": "0.3.0",
       "category": "productivity"
+    },
+    {
+      "name": "leaks",
+      "source": "./plugins/leaks",
+      "description": "Notices private and medical data that reaches the model, lists it per project, and can redact or block it",
+      "version": "0.1.0",
+      "category": "privacy"
     }
   ]
 }
