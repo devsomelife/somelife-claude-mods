@@ -3,6 +3,7 @@ import type { EngineInterface, Register, RenderChildren, SessionAppendInput, Ses
 
 import type { LeaksFilter, LeaksTab, LeaksView } from '../types'
 import { KINDS, PLACEHOLDER, redact, spansOf } from './detect'
+import { sha256 } from './sha256'
 import type { Category, Kind, Match, Span } from './detect'
 
 // How the value reached the model
@@ -81,13 +82,25 @@ export const fmtWhen = (t: number, now: number) => {
   return d.toDateString() === new Date(now).toDateString() ? `today ${hm}` : `${d.toDateString().slice(4, 10)} ${hm}`
 }
 
-// Short description of a tool call: the tool and what it touched
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host
+  } catch {
+    return ''
+  }
+}
+
+// Short description of a tool call: the tool and the file it touched, or the host it fetched.
+// Commands, queries and full URLs are left out: they can carry tokens or passwords
 export const describeTool = (tool: string, input: Record<string, unknown>, root: string) => {
   const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : undefined)
   const path = str('file_path') ?? str('notebook_path') ?? str('path')
-  const rel = path && root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
-  const target = rel ?? str('command') ?? str('url') ?? str('query') ?? str('pattern') ?? str('description')
-  return target ? `${tool} ${clip(oneLine(target), 80)}` : tool
+  if (path) {
+    const rel = root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
+    return `${tool} ${clip(oneLine(rel), 80)}`
+  }
+  const host = hostOf(str('url') ?? '')
+  return host ? `${tool} ${host}` : tool
 }
 
 const stringsOf = (v: unknown, out: string[] = []): string[] => {
@@ -97,20 +110,11 @@ const stringsOf = (v: unknown, out: string[] = []): string[] => {
   return out
 }
 
-const resultText = (content: unknown) =>
-  typeof content === 'string'
-    ? content
-    : Array.isArray(content)
-      ? content.map(b => (b && typeof b === 'object' && 'text' in b && typeof b.text === 'string' ? b.text : '')).join('\n')
-      : ''
-
-
-
 type Piece = { text: string; via: Via; source: string }
 
 type Found = { m: Match; p: Piece; action: Action }
 
-type Settings = { mode: Mode; notify: string; storeRaw: boolean; ignore: string[] }
+type Settings = { mode: Mode; notify: string; storeRaw: boolean; ignore: string[]; failClosed: boolean }
 
 // Scans one text; in redact or block mode also answers what replaces it
 export const guard = (s: Settings, p: Piece, canChange: boolean) => {
@@ -131,6 +135,19 @@ const kindsOf = (found: readonly Found[]) => [...new Set(found.map(f => KINDS[f.
 
 const withheld = (found: readonly Found[]) =>
   `[Withheld by the leaks mod: this content contains ${kindsOf(found)}. Ask the user if you need it.]`
+
+const SCAN_FAILED = '[Withheld by the leaks mod: this content could not be scanned. Ask the user if you need it.]'
+
+// The row with every text the model would read withheld: what a failed scan sends when failing closed
+export const withheldRow = (message: SessionAppendMessage): SessionAppendMessage => ({
+  ...message,
+  content: message.content.map(b =>
+    b.type === 'text' ? { ...b, text: SCAN_FAILED } : b.type === 'tool_result' ? { ...b, content: SCAN_FAILED } : b,
+  ),
+})
+
+const isTextPart = (c: unknown): c is { text: string } =>
+  !!c && typeof c === 'object' && 'text' in c && typeof (c as { text: unknown }).text === 'string'
 
 // One row as the model will read it: scanned, and rewritten in redact or block mode
 export const guardRow = (s: Settings, e: SessionAppendInput) => {
@@ -168,21 +185,27 @@ export const guardRow = (s: Settings, e: SessionAppendInput) => {
       const id = typeof b.tool_use_id === 'string' ? b.tool_use_id : ''
       const source = (toolLabels.get(id) ?? (e.origin.kind === 'tool' ? e.origin.tool : 'tool')) + sub
       toolLabels.delete(id)
-      const piece = { text: resultText(b.content), via: 'tool' as const, source }
-      const g = guard(s, piece, canChange)
-      found.push(...g.found)
-      if (g.text === piece.text) return b
+      const piece = (text: string) => ({ text, via: 'tool' as const, source })
+      if (!Array.isArray(b.content)) {
+        const text = typeof b.content === 'string' ? b.content : ''
+        const g = guard(s, piece(text), canChange)
+        found.push(...g.found)
+        if (g.text === text) return b
+        changed = true
+        return { ...b, content: g.text }
+      }
+      // Each text part is scanned once and redacted in place; images and documents stay where they stand
+      const partFound: Found[] = []
+      const parts = b.content.map(c => {
+        if (!isTextPart(c)) return c
+        const g = guard(s, piece(c.text), canChange)
+        partFound.push(...g.found)
+        return g.text === c.text ? c : { ...c, text: g.text }
+      })
+      found.push(...partFound)
+      if (partFound.length === 0 || !canChange || s.mode === 'notify') return b
       changed = true
-      if (s.mode === 'block') return { ...b, content: g.text }
-      // Redact each text part, keeping images and documents where they stand
-      const parts = Array.isArray(b.content)
-        ? b.content.map(c =>
-            c && typeof c === 'object' && 'text' in c && typeof c.text === 'string'
-              ? { ...c, text: guard(s, { ...piece, text: c.text }, true).text }
-              : c,
-          )
-        : g.text
-      return { ...b, content: parts }
+      return { ...b, content: s.mode === 'block' ? withheld(partFound) : parts }
     }
     return b
   })
@@ -200,6 +223,33 @@ let queue: Promise<unknown> = Promise.resolve()
 // Findings waiting to be written, so the conversation never waits on the store
 let pending: Found[] = []
 let flushTimer: Timer | null = null
+// Stored ids by kind and normalized value, so each value is hashed once per load
+const ids = new Map<string, string>()
+let secret: Promise<string> | null = null
+
+const SECRET = 'secret:fingerprint'
+
+const hex = (bytes: Uint8Array) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+
+// This install's random secret, made on first use, so stored ids cannot be matched against guessed values
+// without it, nor compared across machines
+const secretOf = ($: EngineInterface) =>
+  (secret ??= (async () => {
+    const known = await $.store.get(SECRET)
+    if (typeof known === 'string' && known.length === 64) return known
+    const made = hex(crypto.getRandomValues(new Uint8Array(32)))
+    await $.store.set(SECRET, made)
+    return made
+  })())
+
+// The stored id of a value: SHA-256 of the secret, its kind and normalized form, cut to 96 bits
+export const idFor = (secretHex: string, key: string) => {
+  const known = ids.get(key)
+  if (known) return known
+  const id = hex(sha256(new TextEncoder().encode(`${secretHex}\n${key}`)).slice(0, 12))
+  ids.set(key, id)
+  return id
+}
 
 const projectOf = async ($: EngineInterface) => {
   const repo = await $.session.repo().catch(() => null)
@@ -266,13 +316,16 @@ async function flush($: EngineInterface, s: Settings) {
     seenThisSession.add(f.m.fingerprint)
     fresh.push(f)
   }
+  const key = await secretOf($)
+  const stored = found.map(f => idFor(key, f.m.key))
 
   await edit($, project, log => {
-    for (const { m, p, action } of found) {
-      const prev = log[m.fingerprint]
+    found.forEach(({ m, p, action }, i) => {
+      const id = stored[i] ?? m.fingerprint
+      const prev = log[id]
       const hit: Hit = { at: now, via: p.via, source: p.source, session, action }
-      log[m.fingerprint] = {
-        id: m.fingerprint,
+      log[id] = {
+        id,
         kind: m.kind,
         category: m.category,
         value: s.storeRaw ? m.value : m.masked,
@@ -281,7 +334,7 @@ async function flush($: EngineInterface, s: Settings) {
         lastAt: now,
         hits: [hit, ...(prev?.hits ?? [])].slice(0, HITS_PER_FINDING),
       }
-    }
+    })
     return capFindings(log)
   })
   await update($, rev, n => (n ?? 0) + 1)
@@ -313,11 +366,15 @@ export const register: Register = (on, options) => {
     mode: MODES.find(m => m === options.mode) ?? 'redact',
     notify: typeof options.notify === 'string' ? options.notify : 'toast',
     storeRaw: options.storeRawValues === true,
+    failClosed: options.failClosed !== false,
     ignore: (typeof options.ignore === 'string' ? options.ignore : DEFAULT_IGNORE)
       .split(',')
       .map(s => s.trim().toLowerCase())
       .filter(s => s !== ''),
   }
+  // In redact and block modes, a scan that fails or runs out of time withholds instead of letting data through
+  const strict = settings.failClosed && settings.mode !== 'notify'
+  const scanned = (e: SessionAppendInput) => e.door !== 'notice' && e.door !== 'compaction' && e.message.role !== undefined
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -366,21 +423,25 @@ export const register: Register = (on, options) => {
       await $.prompt.fill({ text: e.text, decorations }).catch(() => undefined)
     }
     return { drop: `Not sent: the prompt contains ${kindsOf(g.found)} (leaks mod, block mode). Remove the underlined parts, or change the mode.` }
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) =>
+    !next.called && strict && settings.mode === 'block' ? { drop: 'Not sent: the leaks mod could not scan this prompt.' } : next(e),
+  )
 
   // Every row the conversation keeps, as the model will read it
   on('session.append', async ($, e, next) => {
-    if (e.door === 'notice' || e.door === 'compaction' || e.message.role === undefined) return next(e)
+    if (!scanned(e)) return next(e)
     let guarded: ReturnType<typeof guardRow> | null = null
     try {
       guarded = guardRow(settings, e)
     } catch {
-      // A failed scan never affects the row
+      if (strict && e.door !== 'response') guarded = { message: withheldRow(e.message), found: [] }
     }
     const stored = await next(guarded && guarded.message !== e.message ? { ...e, message: guarded.message } : e)
     if (guarded) collect($, settings, guarded.found)
     return stored
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) =>
+    !next.called && strict && scanned(e) && e.door !== 'response' ? next({ ...e, message: withheldRow(e.message) }) : next(e),
+  )
 
   on('model.complete', async ($, e, next) => {
     const p = guard(settings, { text: e.prompt, via: 'side-call', source: `complete ${e.model}` }, true)
@@ -390,7 +451,7 @@ export const register: Register = (on, options) => {
     if (found.length === 0 || settings.mode === 'notify') return next(e)
     if (settings.mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(found)} (leaks mod, block mode)` }
     return next({ ...e, prompt: p.text, ...(sys ? { system: sys.text } : {}) })
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (!next.called && strict ? { deny: 'Not sent: the leaks mod could not scan this request' } : next(e)))
 
   on('model.fork', async ($, e, next) => {
     const p = guard(settings, { text: e.prompt, via: 'side-call', source: 'fork' }, true)
@@ -398,7 +459,7 @@ export const register: Register = (on, options) => {
     if (p.found.length === 0 || settings.mode === 'notify') return next(e)
     if (settings.mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(p.found)} (leaks mod, block mode)` }
     return next({ ...e, prompt: p.text })
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (!next.called && strict ? { deny: 'Not sent: the leaks mod could not scan this request' } : next(e)))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
@@ -425,7 +486,7 @@ export const register: Register = (on, options) => {
       void update($, view, cur => ({ ...cur, confirmClear: false, project: value === current ? null : value }))
     const clear = async () => {
       await edit($, shown, () => ({}))
-      for (const f of Object.values(log)) seenThisSession.delete(f.id)
+      seenThisSession.clear()
       await update($, view, cur => ({ ...cur, confirmClear: false }))
       await update($, rev, n => (n ?? 0) + 1)
     }

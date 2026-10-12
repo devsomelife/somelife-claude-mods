@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionAppendInput } from 'claude-code'
 
-import { detect } from './detect'
-import { guard } from './register'
+import { detect, fnv1a, placeholder, spansOf } from './detect'
+import { describeTool, guard, idFor, withheldRow } from './register'
 
 // 2026-10-12 at 14:02 local time
 const NOW = new Date(2026, 9, 12, 14, 2).getTime()
@@ -259,9 +259,87 @@ test('block mode withholds tool results and refuses prompts', { options: { mode:
 
 test('side model calls get the same treatment as rows', () => {
   const piece = { text: 'summarize: jane.doe@gmail.com', via: 'side-call' as const, source: 'complete' }
-  const base = { notify: 'toast', storeRaw: false, ignore: [] }
+  const base = { notify: 'toast', storeRaw: false, ignore: [], failClosed: true }
   expect(guard({ ...base, mode: 'notify' }, piece, true)).toMatchObject({ text: piece.text })
   expect(guard({ ...base, mode: 'redact' }, piece, true)).toMatchObject({ text: 'summarize: [redacted:email]' })
   expect(guard({ ...base, mode: 'block' }, piece, true).text).toContain('Withheld by the leaks mod')
   expect(guard({ ...base, mode: 'redact' }, piece, false)).toMatchObject({ text: piece.text })
+})
+
+test('sources keep the file or host, never commands or full URLs', () => {
+  const root = '/home/me/workspaces/clinic'
+  expect(describeTool('Read', { file_path: '/home/me/workspaces/clinic/data/patients.csv' }, root)).toBe('Read data/patients.csv')
+  expect(describeTool('Bash', { command: 'curl -H "Authorization: Bearer abc123" https://api.example.org' }, root)).toBe('Bash')
+  expect(describeTool('WebFetch', { url: 'https://user:pw@api.example.org/v1?token=abc123' }, root)).toBe('WebFetch api.example.org')
+  expect(describeTool('Grep', { pattern: 'jane.doe' }, root)).toBe('Grep')
+})
+
+test('scans stay linear on hostile input', () => {
+  const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  const unbroken = Array.from({ length: 200_000 }, (_, i) => alpha[(i * 7919) % 62]).join('')
+  const csv = Array.from({ length: 5000 }, (_, i) => `user${i},user${i}@mail${i % 50}.com,06 12 34 ${String(i % 100).padStart(2, '0')} 78\n`).join('')
+  let t = performance.now()
+  expect(spansOf(unbroken)).toHaveLength(0)
+  expect(performance.now() - t).toBeLessThan(100)
+  t = performance.now()
+  expect(spansOf(csv)).toHaveLength(10000)
+  expect(performance.now() - t).toBeLessThan(500)
+})
+
+test('stored ids depend on the install secret', () => {
+  const key = 'email:jane.doe@gmail.com'
+  const a = idFor('a'.repeat(64), key)
+  expect(a).toMatch(/^[0-9a-f]{24}$/)
+  expect(a).not.toBe(fnv1a(key))
+  expect(idFor('a'.repeat(64), key)).toBe(a)
+  expect(idFor('b'.repeat(64), 'email:other@gmail.com')).not.toBe(a)
+})
+
+test('a failed scan withholds every text the model would read', () => {
+  const row = withheldRow({
+    type: 'user',
+    role: 'user',
+    content: [
+      { type: 'text', text: 'jane.doe@gmail.com' },
+      { type: 'tool_result', tool_use_id: 'tu1', content: 'jane.doe@gmail.com' },
+      { type: 'image', source: {} },
+    ],
+  })
+  const text = JSON.stringify(row.content)
+  expect(text).not.toContain('jane.doe')
+  expect(text).toContain('could not be scanned')
+  expect(row.content[2]).toEqual({ type: 'image', source: {} })
+})
+
+test('redacts each text part of a tool result once, keeping images', { options: { mode: 'redact' } }, async ($, on) => {
+  mock.store(on)
+  const { rows, settle } = session(on)
+  await $.session.start(START)
+  await $.session.append({
+    door: 'tool-result',
+    origin: { kind: 'tool', tool: 'Read' },
+    uuid: 'row-parts',
+    message: {
+      type: 'user',
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'tu9',
+          content: [
+            { type: 'text', text: 'mail jane.doe@gmail.com' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+            { type: 'text', text: 'nothing here' },
+          ],
+        },
+      ],
+    },
+  })
+  await settle()
+  const kept = rows.appended().find(r => r.uuid === 'row-parts')?.message.content[0] as unknown as { content: { type: string; text?: string }[] }
+  expect(kept.content.map(c => c.type)).toEqual(['text', 'image', 'text'])
+  expect(kept.content[0]?.text).toBe(`mail ${placeholder('email')}`)
+  expect(kept.content[2]?.text).toBe('nothing here')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /x1/ })).toBeDefined()
 })

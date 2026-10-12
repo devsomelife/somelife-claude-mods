@@ -10,13 +10,13 @@ Watches everything the model reads or writes for private and medical data. By de
 | Notifies | Once per value and session, by toast, system notification, both or off |
 | Modes | `redact` (default), `notify`, `block` |
 | Changes Claude's behaviour | Yes by default: `redact` and `block` change what the model reads; `notify` changes nothing |
-| Settings | `mode`, `notify`, `storeRawValues`, `ignore`, `retentionDays` |
+| Settings | `mode`, `failClosed`, `notify`, `storeRawValues`, `ignore`, `retentionDays` |
 
 ## Behaviour
 
 - Every row the conversation keeps is scanned before it is stored, and the API request is built from the row as stored
 - Detection runs locally, inside Claude Code: no model, no remote service, no network call
-- Only the scan runs in the conversation's path (about 0.4 ms for a 20 KB file); findings are stored and notified 250 ms later, off that path, and anything still waiting is written when the session ends
+- Only the scan runs in the conversation's path (about 0.4 ms for a 20 KB file, under 1 ms for 200 KB of unbroken text: every pattern runs in linear time); findings are stored and notified 250 ms later, off that path, and anything still waiting is written when the session ends
 - Rows the model never reads (notices) and compaction summaries are skipped
 - A project is the git repository's root folder name, or the session folder's name outside git
 - Each distinct value is one finding per project, with its count, first and last time, and its 20 latest occurrences
@@ -40,6 +40,22 @@ Watches everything the model reads or writes for private and medical data. By de
 - Images and PDFs are not scanned, and some attached context is sent as recorded by the engine
 - The session transcript on disk keeps the tool's original output; it stays on your machine
 - Pattern detection catches known formats only: for data that must never leave, also deny Claude access to those folders with a permission rule
+
+## Security Limits
+
+| Limit | Why |
+| --- | --- |
+| Known formats only | Names, postal addresses, free-text medical narratives, other languages and encoded data (base64, hex) are not detected |
+| Not adversarial | Redaction stops accidents, not a model working around it: a prompt injection can make the model transform data (for example `base64 file.csv`) so no pattern matches |
+| Images and PDFs | Not scanned; in `redact` mode they reach the model as they are |
+| Fixed context | Some attached context is sent as recorded by the engine and cannot be rewritten |
+| System prompt and internal calls | Not verified: the system prompt, and model calls Claude Code makes on its own (such as summarizing a fetched page), may not pass through the mod |
+| Local transcript | The session file on disk keeps the tool's original output |
+| Same access as Claude Code | Like every mod it is not sandboxed; read the diff of a new version before `claude plugin update` |
+
+- The mod makes no network call; everything it stores stays in `~/.claude/plugins/store`, readable by your user only
+- In `notify` mode, or with `failClosed` off, a scan that fails lets the content through
+- For data that must never leave, also deny Claude access to those folders with a permission rule
 
 ## How It Works
 
@@ -91,12 +107,14 @@ sequenceDiagram
 | Source | Shown as |
 | --- | --- |
 | Your prompt | Sent by you: prompt |
-| A tool result | Read by a tool: `Read data/patients.csv`, `Bash cat users.json`, `WebFetch https://...` |
+| A tool result | Read by a tool: `Read data/patients.csv`, `Bash`, `WebFetch example.org` |
 | The model's reply or tool input | Written by the model: reply, `Write src/seed.ts` |
 | Files mentioned, memory, hook context | Added as context: the attachment type |
 | Another mod's `$.model.complete` or `$.model.fork` | Side model call |
 
 Subagent rows carry `(subagent)` after the source.
+
+Sources keep the tool and the file path, or the host of a URL. Commands, search patterns and full URLs are never stored: they can hold tokens or passwords.
 
 ## Detection
 
@@ -133,6 +151,7 @@ Each occurrence says what was done with it: `seen`, `redacted` or `blocked`. The
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `mode` | `redact`, `notify`, `block` | `redact` | What happens to data found: replaced by placeholders, recorded only, or withheld |
+| `failClosed` | boolean | `true` | In `redact` and `block` modes, a scan that fails or runs out of time withholds the content (or refuses the prompt or side call) instead of letting it through |
 | `notify` | `toast`, `system`, `both`, `off` | `toast` | How a new finding is announced |
 | `storeRawValues` | boolean | `false` | Keep full values in the history instead of masked ones |
 | `ignore` | string | `example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks` | Comma-separated texts; a finding whose value or source contains one is skipped |
@@ -171,7 +190,8 @@ claude --plugin-dir plugins/leaks
 
 - Stored in the mod's own store under the Claude Code configuration directory, one entry per project
 - Values are masked before storage unless `storeRawValues` is on
-- A short hash of each value is stored to recognise it again
+- Each value is recognised again by a 96-bit SHA-256 id, keyed with a random secret made on first use: without the secret, ids cannot be matched against guessed values, nor compared across machines
+- The secret is kept in the same store: whoever can read the store can still test guesses one value at a time
 - Notifications show masked values only
 - Up to 300 findings per project, the oldest dropped first
 - Nothing leaves your machine

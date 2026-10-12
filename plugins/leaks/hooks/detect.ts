@@ -11,8 +11,10 @@ export type Match = {
   value: string
   // The text with its identifying part hidden
   masked: string
-  // Stable id of the value, for de-duplication
+  // Stable id of the value, for de-duplication within a session; kept in memory only
   fingerprint: string
+  // Kind and normalized value, from which the stored id is derived; kept in memory only
+  key: string
 }
 
 export const KINDS: Record<Kind, { label: string; category: Category }> = {
@@ -82,9 +84,13 @@ const nirValid = (raw: string) => {
 
 const boring = (digits: string) => /^(\d)\1+$/.test(digits) || '01234567890123456789'.includes(digits)
 
+// What a text holds, checked once, so detectors that cannot match are skipped
+type Traits = { at: boolean; plus: boolean; dash: boolean; digit: boolean }
+
 type Detector = {
   kind: Kind
   re: RegExp
+  need?: (t: Traits) => boolean
   check?: (m: RegExpExecArray) => boolean
   value?: (m: RegExpExecArray) => string
   mask: (value: string) => string
@@ -123,7 +129,10 @@ const edge = (alts: string[]) => `(?<![\\p{L}\\p{N}_])(?:${alts.join('|')})(?![\
 const DETECTORS: Detector[] = [
   {
     kind: 'email',
-    re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,24})\b/g,
+    // Starts only where a run of address characters starts, and bounded to the RFC limits,
+    // so a long unbroken run of letters costs one pass instead of one pass per position
+    re: /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.([A-Za-z]{2,24})\b/g,
+    need: t => t.at,
     check: m => !FILE_TLDS.has((m[1] ?? '').toLowerCase()),
     mask: v => {
       const [local = '', domain = ''] = v.split('@')
@@ -134,6 +143,7 @@ const DETECTORS: Detector[] = [
   {
     kind: 'iban',
     re: /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g,
+    need: t => t.digit,
     check: m => ibanValid(m[0]),
     mask: v => maskAlnum(v, 4, 4),
     norm: v => v.replace(/\s/g, '').toUpperCase(),
@@ -141,6 +151,7 @@ const DETECTORS: Detector[] = [
   {
     kind: 'card',
     re: /(?<![\d-])[3-6]\d{3}(?:[ -]?\d){9,15}(?![\d-])/g,
+    need: t => t.digit,
     check: m => {
       const d = digitsOf(m[0])
       return d.length >= 13 && d.length <= 19 && !boring(d) && luhn(d)
@@ -151,6 +162,7 @@ const DETECTORS: Detector[] = [
   {
     kind: 'nir',
     re: /(?<![\w])[12] ?\d{2} ?(?:0[1-9]|1[0-2]|[2-9]\d) ?(?:\d{2}|2A|2B) ?\d{3} ?\d{3} ?\d{2}(?!\d)/g,
+    need: t => t.digit,
     check: m => nirValid(m[0]),
     mask: v => maskAlnum(v, 1, 2),
     norm: v => v.replace(/\s/g, '').toUpperCase(),
@@ -158,6 +170,7 @@ const DETECTORS: Detector[] = [
   {
     kind: 'ssn',
     re: /(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])/g,
+    need: t => t.dash && t.digit,
     mask: v => maskAlnum(v, 0, 4),
     norm: digitsOf,
   },
@@ -165,6 +178,7 @@ const DETECTORS: Detector[] = [
     kind: 'phone',
     // French numbers, local or +33
     re: /(?<![\w+])(?:(?:\+|00)33[ .-]?|0)[1-9](?:[ .-]?\d{2}){4}(?!\d)/g,
+    need: t => t.digit,
     check: m => !boring(digitsOf(m[0])),
     mask: v => maskAlnum(v, 0, 2),
     norm: v => digitsOf(v).replace(/^(?:0033|33)/, '0'),
@@ -173,6 +187,7 @@ const DETECTORS: Detector[] = [
     kind: 'phone',
     // Other international numbers, written with a leading +
     re: /(?<![\w+])\+(?!33)[1-9]\d{0,2}(?:[ .-]?\(?\d{2,4}\)?){2,5}(?!\d)/g,
+    need: t => t.plus && t.digit,
     check: m => {
       const n = digitsOf(m[0]).length
       return n >= 8 && n <= 15
@@ -183,6 +198,7 @@ const DETECTORS: Detector[] = [
   {
     kind: 'birthdate',
     re: /(?:date of birth|birth ?date|d\.o\.b\.?|\bdob|\bborn(?: on)?|\bnée? le|date de naissance)["']?\s*[:=]?\s*["']?(\d{1,2}[/.-]\d{1,2}[/.-](?:19|20)\d{2}|(?:19|20)\d{2}-\d{2}-\d{2})/gi,
+    need: t => t.digit,
     value: m => m[1] ?? m[0],
     mask: v => (/^\d{4}/.test(v) ? v.replace(/(?<=^\d{4}.*)\d/g, '*') : v.replace(/\d(?=.*\d{4}$)/g, '*')),
     norm: digitsOf,
@@ -202,6 +218,7 @@ const DETECTORS: Detector[] = [
   {
     kind: 'health',
     re: /\b(?:ICD-?10|CIM-?10)\s*[:-]?\s*[A-TV-Z]\d{2}(?:\.\d{1,2})?\b/gi,
+    need: t => t.digit,
     mask: v => v,
     norm: v => v.toUpperCase().replace(/\s/g, ''),
   },
@@ -212,28 +229,32 @@ export type Span = Match & { start: number; end: number }
 // Every occurrence of a private or medical value in `text`, minus those `ignore` names
 export const spansOf = (text: string, ignore: readonly string[] = []): Span[] => {
   const out: Span[] = []
-  // Spans already claimed, so an IBAN's digits are not also a card or a phone
-  const taken: [number, number][] = []
+  const traits: Traits = { at: text.includes('@'), plus: text.includes('+'), dash: text.includes('-'), digit: /\d/.test(text) }
+  // Characters already claimed, so an IBAN's digits are not also a card or a phone; made on the first claim
+  let taken: Uint8Array | null = null
   for (const d of DETECTORS) {
+    if (d.need && !d.need(traits)) continue
     d.re.lastIndex = 0
     for (let m = d.re.exec(text); m !== null; m = d.re.exec(text)) {
       const start = m.index
       const end = start + m[0].length
       if (d.check && !d.check(m)) continue
-      if (d.kind !== 'health' && taken.some(([a, b]) => start < b && end > a)) continue
+      if (d.kind !== 'health' && taken !== null && taken.subarray(start, end).includes(1)) continue
       const raw = d.value ? d.value(m) : m[0]
       const value = raw.trim()
       const lower = value.toLowerCase()
       if (ignore.some(i => lower.includes(i))) continue
-      taken.push([start, end])
+      if (d.kind !== 'health') (taken ??= new Uint8Array(text.length)).fill(1, start, end)
       // A value inside the match (a date after its label) is the part redacted
       const at = start + m[0].indexOf(raw) + (raw.length - raw.trimStart().length)
+      const key = `${d.kind}:${d.norm(value)}`
       out.push({
         kind: d.kind,
         category: KINDS[d.kind].category,
         value,
         masked: d.mask(value),
-        fingerprint: fnv1a(`${d.kind}:${d.norm(value)}`),
+        fingerprint: fnv1a(key),
+        key,
         start: at,
         end: at + value.length,
       })

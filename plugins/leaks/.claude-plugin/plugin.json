@@ -1,6 +1,6 @@
 {
   "name": "leaks",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Notices private and medical data that reaches the model, lists it per project, and can redact or block it",
   "author": {
     "name": "Greg",
@@ -18,6 +18,12 @@
         "block"
       ],
       "default": "redact"
+    },
+    "failClosed": {
+      "type": "boolean",
+      "title": "Fail closed",
+      "description": "In redact and block modes, withhold content when a scan fails or runs out of time instead of letting it through",
+      "default": true
     },
     "notify": {
       "type": "string",
