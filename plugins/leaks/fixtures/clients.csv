@@ -1,0 +1,6 @@
+name,email,phone,iban,card,national_id
+Jane Doe,jane.doe@gmail.com,+33 6 12 34 56 78,FR76 3000 6000 0112 3456 7890 189,4111 1111 1111 1111,1 85 05 78 006 084 91
+John Roe,john.roe@outlook.com,+1 415 555 0132,,5555 5555 5555 4444,123-45-6789
+Lotte Peeters,lotte.peeters@telenet.be,+32 470 12 34 56,,,85.07.30-033.28
+Lucia Garcia,lucia.garcia@yahoo.es,+34 612 345 678,,,12345678Z
+Mario Rossi,mario.rossi@libero.it,+39 312 345 6789,,,RSSMRA85T10A562S

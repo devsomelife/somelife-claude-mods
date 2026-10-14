@@ -1,8 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionAppendInput } from 'claude-code'
 
-import { detect, fnv1a, placeholder, spansOf } from './detect'
+import { detect, fnv1a, placeholder, redact, spansOf } from './detect'
 import { describeTool, guard, idFor, withheldRow } from './register'
+import { absolute, formatRules, parseRules, ruleFor, stricter, withRule } from './rules'
 
 // 2026-10-12 at 14:02 local time
 const NOW = new Date(2026, 9, 12, 14, 2).getTime()
@@ -33,6 +34,7 @@ const session = (on: On) => {
   on('session.repo', () => ({ value: null }))
   on('session.root', () => ({ value: '/home/me/workspaces/clinic' }))
   on('session.id', () => ({ value: 'session-1' }))
+  on('env.get', () => ({ value: '/home/me' }))
   on('session.start', ($, e) => e)
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.call', () => ({ result: { text: 'ok' } }))
@@ -68,7 +70,7 @@ const keptText = (rows: { appended: () => readonly SessionAppendInput[] }, uuid:
 
 const kinds = (text: string) => detect(text).map(m => `${m.kind}:${m.masked}`)
 
-test('finds private data and masks it', () => {
+test('finds personal identifiers and masks them', () => {
   expect(kinds('mail jane.doe@gmail.com now')).toEqual(['email:j***@gmail.com'])
   expect(kinds('IBAN FR76 3000 6000 0112 3456 7890 189')).toEqual(['iban:FR76 **** **** **** **** ***0 189'])
   expect(kinds('IBAN FR76 3000 6000 0112 3456 7890 188')).toEqual([])
@@ -77,25 +79,57 @@ test('finds private data and masks it', () => {
   expect(kinds('NIR 1 85 05 78 006 084 91')).toEqual(['nir:1 ** ** ** *** *** 91'])
   expect(kinds('NIR 1 85 05 78 006 084 92')).toEqual([])
   expect(kinds('SSN 123-45-6789, not 000-12-3456')).toEqual(['ssn:***-**-6789'])
-  expect(kinds('tel 06 12 34 56 78')).toEqual(['phone:** ** ** ** 78'])
-  expect(kinds('call +1 415 555 0132')).toEqual(['phone:+* *** *** **32'])
-  expect(kinds('date de naissance : 12/03/1984')).toEqual(['birthdate:**/**/1984'])
   expect(kinds('logo@2x.png, timestamp 1760270520000')).toEqual([])
 })
 
-test('finds medical terms, not lookalikes', () => {
-  expect(kinds('Patient diagnosed with diabetes, HIV positive')).toEqual([
-    'health:diagnosed with',
-    'health:diabetes',
-    'health:HIV',
-  ])
-  expect(kinds('Dossier médical: dépression, traitement Xanax')).toEqual([
-    'health:dossier médical',
-    'health:dépression',
-    'health:xanax',
-  ])
-  expect(kinds('TypeScript diagnostics; this aids the reader; cancellation token')).toEqual([])
+test('finds French phone numbers in national form', () => {
+  expect(kinds('tel 06 12 34 56 78')).toEqual(['phone:** ** ** ** 78'])
+  expect(kinds('tel 01.45.67.89.12 or 0745678912')).toEqual(['phone:**.**.**.**.12', 'phone:********12'])
+  expect(detect('06 12 34 56 78, 06.12.34.56.78 and +33 6 12 34 56 78')).toHaveLength(1)
+  expect(kinds('0123456789, 0000000000, 06 12 34 56 78 90, v1.0612345678, 00612345678')).toEqual([])
+})
+
+test('finds phone numbers in international form', () => {
+  expect(kinds('call +1 415 555 0132')).toEqual(['phone:+* *** *** **32'])
+  expect(kinds('tel +33 6 12 34 56 78')).toEqual(['phone:+** * ** ** ** 78'])
+  expect(kinds('tel 0033 (0)6 12 34 56 78')).toEqual(['phone:**** (*)* ** ** ** 78'])
+  expect(kinds('office +44 20 7946 0958')).toEqual(['phone:+** ** **** **58'])
+  expect(detect('+33 6 12 34 56 78 and 0033612345678')).toHaveLength(1)
+  expect(kinds('id 0012345, tz +02:00, x+12345678, +33 6 12 34 5')).toEqual([])
+  expect(kinds('+1 015 555 0132 has no valid area code')).toEqual([])
+})
+
+test('finds EU national identifiers with a valid check', () => {
+  expect(kinds('NN 85.07.30-033.28')).toEqual(['be-nrn:**.**.**-***.28'])
+  expect(kinds('NN 85.07.30-033.29')).toEqual([])
+  expect(kinds('DNI 12345678Z, NIE X1234567L')).toEqual(['es-dni:********Z', 'es-dni:********L'])
+  expect(kinds('DNI 12345678A')).toEqual([])
+  expect(kinds('CF RSSMRA85T10A562S, lower rssmra85t10a562s')).toEqual(['it-cf:***************S'])
+  expect(kinds('CF RSSMRA85T10A562T')).toEqual([])
+})
+
+test('finds secrets', () => {
+  const gh = `ghp_${'a1B2'.repeat(9)}`
+  expect(kinds(`aws AKIAIOSFODNN7EXAMPLE, token ${gh}`)).toEqual(['api-key:AKIA****MPLE', 'api-key:ghp_****a1B2'])
+  expect(kinds(`key sk-ant-api03-${'x'.repeat(40)}`)).toEqual(['api-key:sk-a****xxxx'])
+  expect(kinds('task-runner sk-short ghp_tooShort')).toEqual([])
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
+  expect(kinds(`Authorization: Bearer ${jwt}`)).toEqual(['jwt:eyJ**** (92 chars)'])
+  const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n+abc/def==\n-----END RSA PRIVATE KEY-----'
+  expect(kinds(`key:\n${pem}\nafter`)).toEqual(['private-key:-----BEGIN RSA PRIVATE KEY-----'])
+  expect(redact(`a ${pem} b`, spansOf(`a ${pem} b`))).toBe('a [redacted:private-key] b')
+})
+
+test('redacts the password of a URL, not the user or host', () => {
+  const url = 'DATABASE_URL=postgres://app:s3cretPw@db.internal:5432/main'
+  expect(kinds(url)).toEqual(['url-password:postgres://app:***@db.internal:5432'])
+  expect(redact(url, spansOf(url))).toBe('DATABASE_URL=postgres://app:[redacted:url-password]@db.internal:5432/main')
+  expect(kinds('https://user:${PASS}@host https://u:password@host https://u:***@host')).toEqual([])
+})
+
+test('ignores values and leaves health terms and names alone', () => {
   expect(detect('jane@example.com', ['example.com'])).toEqual([])
+  expect(kinds('Patient Jean Dupont, diabetes, born on 12/03/1984')).toEqual([])
 })
 
 test('records a tool result under its project and source', { options: { mode: 'notify' } }, async ($, on) => {
@@ -103,7 +137,7 @@ test('records a tool result under its project and source', { options: { mode: 'n
   const { toasts, settle } = session(on)
   await $.session.start(START)
   await $.tool.call({ tool: 'Read', file_path: '/home/me/workspaces/clinic/data/patients.csv', tool_use_id: 'tu1' })
-  await $.session.append(toolResult('tu1', 'name,email,condition\nJane,jane.doe@gmail.com,diabetes'))
+  await $.session.append(toolResult('tu1', 'name,email,key\nJane,jane.doe@gmail.com,AKIAIOSFODNN7EXAMPLE'))
   await settle()
 
   expect(toasts).toHaveLength(1)
@@ -112,7 +146,7 @@ test('records a tool result under its project and source', { options: { mode: 'n
   expect(toasts[0]).not.toContain('jane.doe')
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/clinic.*1 private, 1 medical, 2 occurrences/) })
+  expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/clinic.*1 private, 1 secret, 2 occurrences/) })
   const email = await ui.find({ text: /j\*\*\*@gmail\.com/ })
   expect(email).toBeDefined()
   expect(await ui.find({ text: /Read by a tool: Read data\/patients\.csv/ })).toBeDefined()
@@ -122,9 +156,9 @@ test('notifies once per session, counts every occurrence', { options: { mode: 'n
   mock.store(on)
   const { toasts, settle } = session(on)
   await $.session.start(START)
-  await $.session.append(prompt('my phone is 06 12 34 56 78'))
+  await $.session.append(prompt('my phone is +33 6 12 34 56 78'))
   await settle()
-  await $.session.append(prompt('again: 06.12.34.56.78'))
+  await $.session.append(prompt('again: +33.6.12.34.56.78'))
   await settle()
   expect(toasts).toHaveLength(1)
   expect(toasts[0]).toContain('Sent by you')
@@ -134,8 +168,8 @@ test('notifies once per session, counts every occurrence', { options: { mode: 'n
     expect(await ui.find({ text: /x2/ })).toBeDefined()
     await ui.press({ key: 'tab-timeline' })
     expect(await ui.find({ text: /today 14:02/ })).toBeDefined()
-    await ui.press({ key: 'filter-medical' })
-    expect(await ui.find({ text: /No medical data/ })).toBeDefined()
+    await ui.press({ key: 'filter-secret' })
+    expect(await ui.find({ text: /No secrets/ })).toBeDefined()
     await ui.press({ key: 'filter-all' })
     await ui.press({ key: 'tab-findings' })
     await ui.unmount()
@@ -146,7 +180,7 @@ test('clears a project after confirmation', { options: { mode: 'notify' } }, asy
   mock.store(on)
   const { settle } = session(on)
   await $.session.start(START)
-  await $.session.append(prompt('HIV test result'))
+  await $.session.append(prompt('key AKIAIOSFODNN7EXAMPLE'))
   await settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'clear' })
@@ -180,7 +214,7 @@ test('stores findings after the row, not while it is appended', { options: { mod
   await settle()
   expect(toasts).toHaveLength(1)
   expect(toasts[0]).toMatch(/email j\*\*\*@gmail\.com, iban FR76/)
-  expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/2 private, 0 medical, 2 occurrences/) })
+  expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/2 private, 0 secret, 2 occurrences/) })
 })
 
 test('writes what is waiting when the session ends', { options: { mode: 'notify' } }, async ($, on) => {
@@ -188,10 +222,10 @@ test('writes what is waiting when the session ends', { options: { mode: 'notify'
   session(on)
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start(START)
-  await $.session.append(prompt('HIV test result'))
+  await $.session.append(prompt('key AKIAIOSFODNN7EXAMPLE'))
   await $.session.end({ reason: 'other', sessionId: 'session-1', resume: { id: 'session-1' } })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/0 private, 1 medical/) })
+  expect(await ui.find({ key: 'summary' })).toMatchObject({ text: expect.stringMatching(/0 private, 1 secret/) })
 })
 
 test('redact mode replaces values before the model reads them', { options: { mode: 'redact' } }, async ($, on) => {
@@ -199,19 +233,19 @@ test('redact mode replaces values before the model reads them', { options: { mod
   const { toasts, rows, settle } = session(on)
   await $.session.start(START)
   await $.tool.call({ tool: 'Read', file_path: '/home/me/workspaces/clinic/data/patients.csv', tool_use_id: 'tu1' })
-  await $.session.append(toolResult('tu1', 'Jane,jane.doe@gmail.com,diabetes'))
-  await $.session.append(prompt('call me on 06 12 34 56 78'))
+  await $.session.append(toolResult('tu1', 'Jane,jane.doe@gmail.com,AKIAIOSFODNN7EXAMPLE'))
+  await $.session.append(prompt('call me on +33 6 12 34 56 78'))
   await $.session.append(reply('Noted, jane.doe@gmail.com'))
   await settle()
 
-  expect(keptText(rows, 'row-tu1')).toContain('Jane,[redacted:email],[redacted:health]')
+  expect(keptText(rows, 'row-tu1')).toContain('Jane,[redacted:email],[redacted:api-key]')
   expect(keptText(rows, 'row-tu1')).not.toContain('jane.doe')
   expect(keptText(rows, 'row-prompt')).toContain('call me on [redacted:phone]')
   expect(keptText(rows, 'row-reply')).toContain('jane.doe@gmail.com')
   expect(toasts[0]).toMatch(/^Sensitive data redacted/)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ text: /Mode: redact/ })).toBeDefined()
+  expect(await ui.find({ text: /Mode here: redact, default/ })).toBeDefined()
   expect(await ui.find({ text: /Read data\/patients\.csv, redacted/ })).toBeDefined()
 })
 
@@ -219,7 +253,7 @@ test('redact is the default mode', async ($, on) => {
   mock.store(on)
   const { rows } = session(on)
   await $.session.start(START)
-  await $.session.append(prompt('call me on 06 12 34 56 78'))
+  await $.session.append(prompt('call me on +33 6 12 34 56 78'))
   expect(keptText(rows, 'row-prompt')).toContain('call me on [redacted:phone]')
 })
 
@@ -241,11 +275,11 @@ test('block mode withholds tool results and refuses prompts', { options: { mode:
   on('prompt.fill', ($, e) => (fills.push(e.text), { isFilled: true }))
   await $.session.start(START)
   await $.tool.call({ tool: 'Read', file_path: '/home/me/workspaces/clinic/data/patients.csv', tool_use_id: 'tu1' })
-  await $.session.append(toolResult('tu1', 'Jane,jane.doe@gmail.com,diabetes'))
+  await $.session.append(toolResult('tu1', 'Jane,jane.doe@gmail.com,AKIAIOSFODNN7EXAMPLE'))
 
   const kept = keptText(rows, 'row-tu1')
   expect(kept).toContain('Withheld by the leaks mod')
-  expect(kept).toContain('email, health term')
+  expect(kept).toContain('email, api key')
   expect(kept).not.toContain('Jane')
 
   const sent = await $.prompt.submit({ text: 'my card is 4111 1111 1111 1111', wait: false, origin: { kind: 'composer' } })
@@ -277,7 +311,7 @@ test('sources keep the file or host, never commands or full URLs', () => {
 test('scans stay linear on hostile input', () => {
   const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   const unbroken = Array.from({ length: 200_000 }, (_, i) => alpha[(i * 7919) % 62]).join('')
-  const csv = Array.from({ length: 5000 }, (_, i) => `user${i},user${i}@mail${i % 50}.com,06 12 34 ${String(i % 100).padStart(2, '0')} 78\n`).join('')
+  const csv = Array.from({ length: 5000 }, (_, i) => `user${i},user${i}@mail${i % 50}.com,+33 6 12 34 ${String(i % 100).padStart(2, '0')} 78\n`).join('')
   let t = performance.now()
   expect(spansOf(unbroken)).toHaveLength(0)
   expect(performance.now() - t).toBeLessThan(100)
@@ -342,4 +376,134 @@ test('redacts each text part of a tool result once, keeping images', { options: 
   expect(kept.content[2]?.text).toBe('nothing here')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ text: /x1/ })).toBeDefined()
+})
+
+test('keeps full values only for personal identifiers, never secrets', { options: { mode: 'notify', storeRawValues: true } }, async ($, on) => {
+  mock.store(on)
+  const { settle } = session(on)
+  await $.session.start(START)
+  await $.session.append(prompt('jane.doe@gmail.com AKIAIOSFODNN7EXAMPLE'))
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /jane\.doe@gmail\.com/ })).toBeDefined()
+  expect(await ui.find({ text: /AKIA\*\*\*\*MPLE/ })).toBeDefined()
+  expect(await ui.find({ text: /AKIAIOSFODNN7EXAMPLE/ })).toBeUndefined()
+})
+
+// The engine's /config rows for this mod, as a store the mod writes through `$.config.set`
+const config = (on: On, values: Record<string, string>) => {
+  on('config.list', () => ({
+    value: Object.entries(values).map(([key, value]) => ({
+      key,
+      label: key,
+      kind: 'text' as const,
+      value,
+      provider: { plugin: 'leaks@somelife-claude-mods', tier: 'user' as never },
+      isLocked: false,
+    })),
+  }))
+  on('config.set', ($, e) => ((values[e.key] = String(e.value)), { value: e.value }))
+  return values
+}
+
+const HOME = '/home/me'
+
+const COMMAND = { command: 'some-leaks', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const
+
+test('reads rules per folder', () => {
+  const rules = parseRules('~/clients=block, ~/clients/acme/=off, /srv/data = redact, relative=block, ~/x=loud, nonsense', HOME)
+  expect(rules).toEqual([
+    { path: '/home/me/clients', mode: 'block' },
+    { path: '/home/me/clients/acme', mode: 'off' },
+    { path: '/srv/data', mode: 'redact' },
+  ])
+  expect(ruleFor(rules, '/home/me/clients/acme/src/a.ts')?.mode).toBe('off')
+  expect(ruleFor(rules, '/home/me/clients/other')?.mode).toBe('block')
+  expect(ruleFor(rules, '/home/me/clientsX')).toBeNull()
+  expect(formatRules(withRule(rules, '/home/me/clients', null), HOME)).toBe('~/clients/acme=off, /srv/data=redact')
+  expect(formatRules(withRule(rules, '/srv/data', 'notify'), HOME)).toBe('~/clients=block, ~/clients/acme=off, /srv/data=notify')
+  expect(absolute('./data/a.csv', '/home/me/p')).toBe('/home/me/p/data/a.csv')
+  expect(stricter('off', 'notify')).toBe('notify')
+  expect(stricter('block', 'redact')).toBe('block')
+})
+
+test('a folder rule sets the session mode', { options: { mode: 'redact', rules: '~/workspaces/clinic=off' } }, async ($, on) => {
+  mock.store(on)
+  const { toasts, rows, settle } = session(on)
+  await $.session.start(START)
+  await $.session.append(prompt('call me on +33 6 12 34 56 78'))
+  await settle()
+  expect(keptText(rows, 'row-prompt')).toContain('+33 6 12 34 56 78')
+  expect(toasts).toHaveLength(0)
+})
+
+test('a file read takes the stricter of the two modes', { options: { mode: 'notify', rules: '~/workspaces/clinic/data=block' } }, async ($, on) => {
+  mock.store(on)
+  const { rows } = session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Read', file_path: '/home/me/workspaces/clinic/data/clients.csv', tool_use_id: 'tu1' })
+  await $.session.append(toolResult('tu1', 'jane.doe@gmail.com'))
+  await $.tool.call({ tool: 'Read', file_path: 'README.md', tool_use_id: 'tu2' })
+  await $.session.append(toolResult('tu2', 'jane.doe@gmail.com'))
+  expect(keptText(rows, 'row-tu1')).toContain('Withheld by the leaks mod')
+  expect(keptText(rows, 'row-tu2')).toContain('jane.doe@gmail.com')
+})
+
+test('a session rule is not weakened by a file rule', { options: { mode: 'notify', rules: '~/workspaces/clinic=block, /tmp=off' } }, async ($, on) => {
+  mock.store(on)
+  const { rows } = session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Read', file_path: '/tmp/dump.txt', tool_use_id: 'tu1' })
+  await $.session.append(toolResult('tu1', 'jane.doe@gmail.com'))
+  expect(keptText(rows, 'row-tu1')).toContain('Withheld by the leaks mod')
+})
+
+test('the pane sets the mode of the project and the default', async ($, on) => {
+  mock.store(on)
+  const { rows } = session(on)
+  const values = config(on, { 'leaks@somelife-claude-mods.mode': 'redact', 'leaks@somelife-claude-mods.rules': '' })
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-modes' })
+  expect(await ui.find({ text: /No rules/ })).toBeDefined()
+
+  await ui.press({ key: 'here-block' })
+  expect(values['leaks@somelife-claude-mods.rules']).toBe('~/workspaces/clinic=block')
+  expect(await ui.find({ text: /~\/workspaces\/clinic = block/ })).toBeDefined()
+  await $.session.append(prompt('mail jane.doe@gmail.com'))
+  expect(keptText(rows, 'row-prompt')).toContain('Withheld by the leaks mod')
+
+  await ui.press({ key: 'default-notify' })
+  expect(values['leaks@somelife-claude-mods.mode']).toBe('notify')
+  await ui.press({ key: 'rule-remove-0' })
+  expect(values['leaks@somelife-claude-mods.rules']).toBe('')
+  expect(await ui.find({ text: /Mode here: notify, default/ })).toBeDefined()
+})
+
+test('the command sets the mode of the project and the default', { options: { rules: '/srv=off' } }, async ($, on) => {
+  mock.store(on)
+  session(on)
+  const values = config(on, { 'leaks.mode': 'redact', 'leaks.rules': '/srv=off' })
+  await $.session.start(START)
+  expect(await $.command.run({ ...COMMAND, args: 'mode block' })).toMatchObject({ text: expect.stringContaining('~/workspaces/clinic now uses the block mode') })
+  expect(values['leaks.rules']).toBe('/srv=off, ~/workspaces/clinic=block')
+  expect(await $.command.run({ ...COMMAND, args: 'default off' })).toMatchObject({ text: 'Default mode is now off.' })
+  expect(values['leaks.mode']).toBe('off')
+  expect(await $.command.run({ ...COMMAND, args: 'mode loud' })).toMatchObject({ text: expect.stringContaining('Usage') })
+})
+
+test('a change made in /config applies at once', async ($, on) => {
+  mock.store(on)
+  const { rows } = session(on)
+  config(on, { 'leaks.mode': 'redact', 'leaks.rules': '' })
+  await $.session.start(START)
+  await $.config.set({
+    key: 'leaks.mode',
+    value: 'off',
+    previous: 'redact',
+    provider: { plugin: 'leaks', tier: 'user' as never },
+    origin: { kind: 'composer' },
+  })
+  await $.session.append(prompt('mail jane.doe@gmail.com'))
+  expect(keptText(rows, 'row-prompt')).toContain('jane.doe@gmail.com')
 })

@@ -2,17 +2,19 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, SessionAppendInput, SessionAppendMessage, Timer } from 'claude-code'
 
 import type { LeaksFilter, LeaksTab, LeaksView } from '../types'
-import { KINDS, PLACEHOLDER, redact, spansOf } from './detect'
+import { KINDS, PLACEHOLDER, isKind, redact, spansOf } from './detect'
+import { MODES, absolute, formatRules, isMode, parseRules, ruleFor, stricter, tilde, withRule } from './rules'
 import { sha256 } from './sha256'
 import type { Category, Kind, Match, Span } from './detect'
+import type { Mode, Rule } from './rules'
+
+export type { Mode } from './rules'
 
 // How the value reached the model
 export type Via = 'prompt' | 'tool' | 'model' | 'context' | 'side-call'
 
 // What the mod did with the value: let it through, replaced it, withheld it
 export type Action = 'seen' | 'redacted' | 'blocked'
-
-export type Mode = 'notify' | 'redact' | 'block'
 
 export type Hit = { at: number; via: Via; source: string; session: string; action?: Action }
 
@@ -47,17 +49,19 @@ const VIA_LABELS: Record<Via, string> = {
   'side-call': 'Side model call',
 }
 const ACTION_LABELS: Record<Action, string> = { seen: 'seen', redacted: 'redacted', blocked: 'blocked' }
-// Tools that write: in redact mode they may not write placeholders back over real values
+const MODE_LABELS: Record<Mode, string> = { off: 'Off', notify: 'Notify', redact: 'Redact', block: 'Block' }
+// Tools that write: in redact and block modes they may not write placeholders back over real values
 const WRITERS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash'])
-const COLORS: Record<Category, string> = { private: '#3987e5', medical: '#e87ba4' }
+const COLORS: Record<Category, string> = { private: '#3987e5', secret: '#e8a33d' }
 const TABS: { id: LeaksTab; label: string; hotkey: string }[] = [
   { id: 'findings', label: 'Findings', hotkey: 'f' },
   { id: 'timeline', label: 'Timeline', hotkey: 't' },
+  { id: 'modes', label: 'Modes', hotkey: 'm' },
 ]
 const FILTERS: { id: LeaksFilter; label: string; hotkey: string }[] = [
   { id: 'all', label: 'All', hotkey: 'a' },
   { id: 'private', label: 'Private', hotkey: 'p' },
-  { id: 'medical', label: 'Medical', hotkey: 'm' },
+  { id: 'secret', label: 'Secrets', hotkey: 's' },
 ]
 
 const view = atom({ plugin: 'leaks', key: 'view' } as const, {
@@ -65,6 +69,7 @@ const view = atom({ plugin: 'leaks', key: 'view' } as const, {
   filter: 'all',
   project: null,
   confirmClear: false,
+  notice: null,
 } as LeaksView)
 const rev = atom({ plugin: 'leaks', key: 'rev' } as const, 0)
 
@@ -90,16 +95,21 @@ const hostOf = (url: string) => {
   }
 }
 
+// The file a tool call touches, when it names one
+const pathOf = (input: Record<string, unknown>) => {
+  for (const k of ['file_path', 'notebook_path', 'path']) if (typeof input[k] === 'string' && input[k] !== '') return input[k] as string
+  return undefined
+}
+
 // Short description of a tool call: the tool and the file it touched, or the host it fetched.
 // Commands, queries and full URLs are left out: they can carry tokens or passwords
 export const describeTool = (tool: string, input: Record<string, unknown>, root: string) => {
-  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : undefined)
-  const path = str('file_path') ?? str('notebook_path') ?? str('path')
+  const path = pathOf(input)
   if (path) {
     const rel = root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
     return `${tool} ${clip(oneLine(rel), 80)}`
   }
-  const host = hostOf(str('url') ?? '')
+  const host = hostOf(typeof input.url === 'string' ? input.url : '')
   return host ? `${tool} ${host}` : tool
 }
 
@@ -114,10 +124,12 @@ type Piece = { text: string; via: Via; source: string }
 
 type Found = { m: Match; p: Piece; action: Action }
 
-type Settings = { mode: Mode; notify: string; storeRaw: boolean; ignore: string[]; failClosed: boolean }
+// `mode` is the default mode; `rules` set other modes per folder
+type Settings = { mode: Mode; rules: Rule[]; rulesText: string; notify: string; storeRaw: boolean; ignore: string[]; failClosed: boolean }
 
-// Scans one text; in redact or block mode also answers what replaces it
-export const guard = (s: Settings, p: Piece, canChange: boolean) => {
+// Scans one text in `s.mode`; in redact or block mode also answers what replaces it
+export const guard = (s: Pick<Settings, 'mode' | 'ignore'>, p: Piece, canChange: boolean) => {
+  if (s.mode === 'off') return { text: p.text, found: [] as Found[], spans: [] as Span[] }
   const spans: Span[] = s.ignore.some(i => p.source.toLowerCase().includes(i)) ? [] : spansOf(p.text, s.ignore)
   const action: Action = spans.length === 0 || !canChange || s.mode === 'notify' ? 'seen' : s.mode === 'redact' ? 'redacted' : 'blocked'
   const seen = new Set<string>()
@@ -149,7 +161,11 @@ export const withheldRow = (message: SessionAppendMessage): SessionAppendMessage
 const isTextPart = (c: unknown): c is { text: string } =>
   !!c && typeof c === 'object' && 'text' in c && typeof (c as { text: unknown }).text === 'string'
 
-// One row as the model will read it: scanned, and rewritten in redact or block mode
+const resultIds = (e: SessionAppendInput) =>
+  e.message.content.flatMap(b => (b.type === 'tool_result' && typeof b.tool_use_id === 'string' ? [b.tool_use_id] : []))
+
+// One row as the model will read it: scanned, and rewritten in redact or block mode.
+// `s.mode` is the session's; a tool result takes the mode its call was given
 export const guardRow = (s: Settings, e: SessionAppendInput) => {
   const message = e.message
   const sub = e.agentId !== undefined ? ' (subagent)' : ''
@@ -183,12 +199,13 @@ export const guardRow = (s: Settings, e: SessionAppendInput) => {
     }
     if (b.type === 'tool_result') {
       const id = typeof b.tool_use_id === 'string' ? b.tool_use_id : ''
-      const source = (toolLabels.get(id) ?? (e.origin.kind === 'tool' ? e.origin.tool : 'tool')) + sub
-      toolLabels.delete(id)
+      const call = toolCalls.get(id)
+      const ts = call ? { ...s, mode: call.mode } : s
+      const source = (call?.label ?? (e.origin.kind === 'tool' ? e.origin.tool : 'tool')) + sub
       const piece = (text: string) => ({ text, via: 'tool' as const, source })
       if (!Array.isArray(b.content)) {
         const text = typeof b.content === 'string' ? b.content : ''
-        const g = guard(s, piece(text), canChange)
+        const g = guard(ts, piece(text), canChange)
         found.push(...g.found)
         if (g.text === text) return b
         changed = true
@@ -198,14 +215,14 @@ export const guardRow = (s: Settings, e: SessionAppendInput) => {
       const partFound: Found[] = []
       const parts = b.content.map(c => {
         if (!isTextPart(c)) return c
-        const g = guard(s, piece(c.text), canChange)
+        const g = guard(ts, piece(c.text), canChange)
         partFound.push(...g.found)
         return g.text === c.text ? c : { ...c, text: g.text }
       })
       found.push(...partFound)
-      if (partFound.length === 0 || !canChange || s.mode === 'notify') return b
+      if (partFound.length === 0 || !canChange || ts.mode === 'notify') return b
       changed = true
-      return { ...b, content: s.mode === 'block' ? withheld(partFound) : parts }
+      return { ...b, content: ts.mode === 'block' ? withheld(partFound) : parts }
     }
     return b
   })
@@ -213,9 +230,11 @@ export const guardRow = (s: Settings, e: SessionAppendInput) => {
 }
 
 // Session-scoped facts, rebuilt on reload
-const toolLabels = new Map<string, string>()
+// What each tool call touched and the mode its result is read in
+const toolCalls = new Map<string, { label: string; mode: Mode }>()
 const seenThisSession = new Set<string>()
 let root = ''
+let home = ''
 let project = ''
 let session = ''
 // Serialises read-modify-write cycles on the store within this session
@@ -251,10 +270,13 @@ export const idFor = (secretHex: string, key: string) => {
   return id
 }
 
-const projectOf = async ($: EngineInterface) => {
+// The folder a project rule applies to: the git repository's root, or the session's outside git
+const projectRootOf = async ($: EngineInterface) => {
   const repo = await $.session.repo().catch(() => null)
-  return basename(repo?.root ?? (await $.session.root()))
+  return repo?.root ?? (await $.session.root())
 }
+
+const projectOf = async ($: EngineInterface) => basename(await projectRootOf($))
 
 const loadProject = async ($: EngineInterface, name: string) =>
   ((await $.store.get(PROJECT_PREFIX + name)) ?? {}) as ProjectLog
@@ -328,7 +350,8 @@ async function flush($: EngineInterface, s: Settings) {
         id,
         kind: m.kind,
         category: m.category,
-        value: s.storeRaw ? m.value : m.masked,
+        // Secrets are never stored whole, whatever the setting
+        value: s.storeRaw && m.category === 'private' ? m.value : m.masked,
         count: (prev?.count ?? 0) + 1,
         firstAt: prev?.firstAt ?? now,
         lastAt: now,
@@ -349,21 +372,56 @@ async function prune($: EngineInterface, retentionDays: number) {
       const out: ProjectLog = {}
       for (const f of Object.values(log)) {
         const hits = f.hits.filter(hit => hit.at >= cutoff)
-        if (hits.length > 0) out[f.id] = { ...f, hits }
+        // Kinds a former version detected are dropped
+        if (hits.length > 0 && isKind(f.kind)) out[f.id] = { ...f, hits }
       }
       return out
     })
   }
 }
 
-const MODES: readonly Mode[] = ['notify', 'redact', 'block']
-// The mod's own sources hold the term list, which would flag on every read
+// This mod's rows in /config, `<plugin>.<field>`, whatever marketplace it came from
+const OWN_ROW = /^leaks(?:@[^.]*)?\.(\w+)$/
+
+// Takes a new value of the default mode or the rules
+function applySetting(s: Settings, field: string, value: unknown) {
+  if (field === 'mode' && isMode(value)) s.mode = value
+  if (field === 'rules' && typeof value === 'string') {
+    s.rulesText = value
+    s.rules = parseRules(value, home)
+  }
+}
+
+// Writes one of this mod's settings as the /config menu would; the reason when refused
+async function writeSetting($: EngineInterface, s: Settings, field: 'mode' | 'rules', value: string): Promise<string | null> {
+  const row = (await $.config.list()).find(r => OWN_ROW.exec(r.key)?.[1] === field)
+  if (!row) return `The leaks "${field}" setting was not found in /config`
+  const res = await $.config.set({ key: row.key, value })
+  if (res.deny !== undefined) return res.deny
+  applySetting(s, field, value)
+  await update($, rev, n => (n ?? 0) + 1)
+  return null
+}
+
+// Sets the mode of the current project's folder, or removes its rule
+async function setHere($: EngineInterface, s: Settings, mode: Mode | null) {
+  const path = await projectRootOf($)
+  const deny = await writeSetting($, s, 'rules', formatRules(withRule(s.rules, path, mode), home))
+  return { path, deny }
+}
+
+// The mod's own sources and tests hold sample values, which would flag on every read
 const DEFAULT_IGNORE = 'example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks'
+const USAGE =
+  'Usage: /some-leaks opens the pane; /some-leaks mode <off|notify|redact|block|default> sets this project; /some-leaks default <off|notify|redact|block> sets the default'
 
 export const register: Register = (on, options) => {
   const retentionDays = typeof options.retentionDays === 'number' ? options.retentionDays : 90
   const settings: Settings = {
-    mode: MODES.find(m => m === options.mode) ?? 'redact',
+    mode: isMode(options.mode) ? options.mode : 'redact',
+    rules: [],
+    // Parsed once the home folder is known, so `~` resolves
+    rulesText: typeof options.rules === 'string' ? options.rules : '',
     notify: typeof options.notify === 'string' ? options.notify : 'toast',
     storeRaw: options.storeRawValues === true,
     failClosed: options.failClosed !== false,
@@ -372,16 +430,29 @@ export const register: Register = (on, options) => {
       .map(s => s.trim().toLowerCase())
       .filter(s => s !== ''),
   }
+
+  const modeAt = (path: string): Mode => ruleFor(settings.rules, path)?.mode ?? settings.mode
+  const sessionMode = (): Mode => (root ? modeAt(root) : settings.mode)
+  // A file read takes the stricter of the session's mode and its own folder's
+  const callMode = (input: Record<string, unknown>): Mode => {
+    const path = pathOf(input)
+    return path ? stricter(sessionMode(), modeAt(absolute(path, root))) : sessionMode()
+  }
+  // The strictest mode any part of the row is read in
+  const rowMode = (e: SessionAppendInput) =>
+    resultIds(e).reduce<Mode>((m, id) => stricter(m, toolCalls.get(id)?.mode ?? m), sessionMode())
   // In redact and block modes, a scan that fails or runs out of time withholds instead of letting data through
-  const strict = settings.failClosed && settings.mode !== 'notify'
+  const strictIn = (mode: Mode) => settings.failClosed && (mode === 'redact' || mode === 'block')
   const scanned = (e: SessionAppendInput) => e.door !== 'notice' && e.door !== 'compaction' && e.message.role !== undefined
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'some-leaks',
-      description: 'List the private and medical data seen by the model, per project',
+      description: 'List the personal identifiers and secrets seen by the model, and set the mode per project',
     })
     root = await $.session.root()
+    home = ((await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined)) ?? '').replace(/\\/g, '/')
+    settings.rules = parseRules(settings.rulesText, home)
     await prune($, retentionDays)
     return next(e)
   })
@@ -392,20 +463,43 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'some-leaks' }, async $ => {
+  // A change of this mod's mode or rules in /config applies at once
+  on('config.set', async ($, e, next) => {
+    const res = await next(e)
+    const field = OWN_ROW.exec(e.key)?.[1]
+    if (res.deny === undefined && field) {
+      applySetting(settings, field, res.value)
+      await update($, rev, n => (n ?? 0) + 1)
+    }
+    return res
+  })
+
+  on('command.run', { command: 'some-leaks' }, async ($, e) => {
+    const [verb = '', arg = ''] = e.args.trim().toLowerCase().split(/\s+/)
+    if (verb === 'mode' && (isMode(arg) || arg === 'default')) {
+      const { path, deny } = await setHere($, settings, isMode(arg) ? arg : null)
+      if (deny) return { text: `Not changed: ${deny}` }
+      return { text: `${tilde(path, home)} now uses ${isMode(arg) ? `the ${arg} mode` : `the default mode (${settings.mode})`}.` }
+    }
+    if (verb === 'default' && isMode(arg)) {
+      const deny = await writeSetting($, settings, 'mode', arg)
+      return { text: deny ? `Not changed: ${deny}` : `Default mode is now ${arg}.` }
+    }
+    if (verb !== '') return { text: USAGE }
     await $.ui.open({ id: PANE, title: 'Leaks' })
     return { text: 'Leaks pane opened.' }
   })
 
-  // Remembers what each tool call touched, to name the source of its result;
-  // in redact mode, refuses to write placeholders back over the real values
+  // Remembers what each tool call touched and the mode its result is read in;
+  // in redact and block modes, refuses to write placeholders back over the real values
   on('tool.call', ($, e, next) => {
     const input = e as unknown as Record<string, unknown>
-    toolLabels.set(e.tool_use_id, describeTool(String(e.tool), input, root))
-    if (settings.mode === 'redact' && WRITERS.has(String(e.tool)) && PLACEHOLDER.test(stringsOf(input).join('\n'))) {
+    const mode = callMode(input)
+    toolCalls.set(e.tool_use_id, { label: describeTool(String(e.tool), input, root), mode })
+    if ((mode === 'redact' || mode === 'block') && WRITERS.has(String(e.tool)) && PLACEHOLDER.test(stringsOf(input).join('\n'))) {
       return {
         deny:
-          'This input contains [redacted:...] placeholders the leaks mod put in place of private or medical data. ' +
+          'This input contains [redacted:...] placeholders the leaks mod put in place of personal identifiers or secrets. ' +
           'Writing it would replace the real values. Ask the user to make this change.',
       }
     }
@@ -414,8 +508,11 @@ export const register: Register = (on, options) => {
 
   // In block mode, a prompt holding sensitive data is not sent and goes back to the prompt box
   on('prompt.submit', async ($, e, next) => {
-    if (settings.mode !== 'block') return next(e)
-    const g = guard(settings, { text: e.text, via: 'prompt', source: 'prompt' }, true)
+    // The session's folder can change with /cd or a worktree move
+    root = await $.session.root()
+    const mode = sessionMode()
+    if (mode !== 'block') return next(e)
+    const g = guard({ ...settings, mode }, { text: e.text, via: 'prompt', source: 'prompt' }, true)
     if (g.found.length === 0) return next(e)
     collect($, settings, g.found)
     if (e.origin.kind === 'composer') {
@@ -424,42 +521,48 @@ export const register: Register = (on, options) => {
     }
     return { drop: `Not sent: the prompt contains ${kindsOf(g.found)} (leaks mod, block mode). Remove the underlined parts, or change the mode.` }
   }).catch(($, e, next) =>
-    !next.called && strict && settings.mode === 'block' ? { drop: 'Not sent: the leaks mod could not scan this prompt.' } : next(e),
+    !next.called && strictIn(sessionMode()) && sessionMode() === 'block' ? { drop: 'Not sent: the leaks mod could not scan this prompt.' } : next(e),
   )
 
   // Every row the conversation keeps, as the model will read it
   on('session.append', async ($, e, next) => {
-    if (!scanned(e)) return next(e)
+    if (!scanned(e) || rowMode(e) === 'off') return next(e)
     let guarded: ReturnType<typeof guardRow> | null = null
     try {
-      guarded = guardRow(settings, e)
+      guarded = guardRow({ ...settings, mode: sessionMode() }, e)
     } catch {
-      if (strict && e.door !== 'response') guarded = { message: withheldRow(e.message), found: [] }
+      if (strictIn(rowMode(e)) && e.door !== 'response') guarded = { message: withheldRow(e.message), found: [] }
     }
     const stored = await next(guarded && guarded.message !== e.message ? { ...e, message: guarded.message } : e)
+    for (const id of resultIds(e)) toolCalls.delete(id)
     if (guarded) collect($, settings, guarded.found)
     return stored
   }).catch(($, e, next) =>
-    !next.called && strict && scanned(e) && e.door !== 'response' ? next({ ...e, message: withheldRow(e.message) }) : next(e),
+    !next.called && strictIn(rowMode(e)) && scanned(e) && e.door !== 'response' ? next({ ...e, message: withheldRow(e.message) }) : next(e),
   )
 
   on('model.complete', async ($, e, next) => {
-    const p = guard(settings, { text: e.prompt, via: 'side-call', source: `complete ${e.model}` }, true)
-    const sys = e.system === undefined ? null : guard(settings, { text: e.system, via: 'side-call', source: `complete ${e.model}` }, true)
+    const mode = sessionMode()
+    if (mode === 'off') return next(e)
+    const s = { ...settings, mode }
+    const p = guard(s, { text: e.prompt, via: 'side-call', source: `complete ${e.model}` }, true)
+    const sys = e.system === undefined ? null : guard(s, { text: e.system, via: 'side-call', source: `complete ${e.model}` }, true)
     const found = [...p.found, ...(sys?.found ?? [])]
     collect($, settings, found)
-    if (found.length === 0 || settings.mode === 'notify') return next(e)
-    if (settings.mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(found)} (leaks mod, block mode)` }
+    if (found.length === 0 || mode === 'notify') return next(e)
+    if (mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(found)} (leaks mod, block mode)` }
     return next({ ...e, prompt: p.text, ...(sys ? { system: sys.text } : {}) })
-  }).catch(($, e, next) => (!next.called && strict ? { deny: 'Not sent: the leaks mod could not scan this request' } : next(e)))
+  }).catch(($, e, next) => (!next.called && strictIn(sessionMode()) ? { deny: 'Not sent: the leaks mod could not scan this request' } : next(e)))
 
   on('model.fork', async ($, e, next) => {
-    const p = guard(settings, { text: e.prompt, via: 'side-call', source: 'fork' }, true)
+    const mode = sessionMode()
+    if (mode === 'off') return next(e)
+    const p = guard({ ...settings, mode }, { text: e.prompt, via: 'side-call', source: 'fork' }, true)
     collect($, settings, p.found)
-    if (p.found.length === 0 || settings.mode === 'notify') return next(e)
-    if (settings.mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(p.found)} (leaks mod, block mode)` }
+    if (p.found.length === 0 || mode === 'notify') return next(e)
+    if (mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(p.found)} (leaks mod, block mode)` }
     return next({ ...e, prompt: p.text })
-  }).catch(($, e, next) => (!next.called && strict ? { deny: 'Not sent: the leaks mod could not scan this request' } : next(e)))
+  }).catch(($, e, next) => (!next.called && strictIn(sessionMode()) ? { deny: 'Not sent: the leaks mod could not scan this request' } : next(e)))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
@@ -468,7 +571,8 @@ export const register: Register = (on, options) => {
     await read($, rev)
     const v = await read($, view)
     const now = await $.clock.now()
-    const current = project !== '' ? project : await projectOf($)
+    const here = await projectRootOf($)
+    const current = basename(here)
     const projects = (await $.store.keys())
       .filter(k => k.startsWith(PROJECT_PREFIX))
       .map(k => k.slice(PROJECT_PREFIX.length))
@@ -476,12 +580,18 @@ export const register: Register = (on, options) => {
     projects.sort()
     const shown = v.project ?? current
     const log = await loadProject($, shown)
-    const findings = Object.values(log)
-      .filter(f => v.filter === 'all' || f.category === v.filter)
+    const filter = FILTERS.some(f => f.id === v.filter) ? v.filter : 'all'
+    const tab = TABS.some(t => t.id === v.tab) ? v.tab : 'findings'
+    // Kinds a former version detected are left out until the next prune
+    const all = Object.values(log).filter(f => isKind(f.kind))
+    const findings = all
+      .filter(f => filter === 'all' || f.category === filter)
       .sort((a, b) => b.lastAt - a.lastAt)
     const cols = Math.max(32, e.props.bodyColumns)
+    const sessionRule = root ? ruleFor(settings.rules, root) : null
+    const modeLine = `Mode here: ${sessionMode()}, ${sessionRule ? `rule for ${tilde(sessionRule.path, home)}` : 'default'}`
 
-    const set = (patch: Partial<LeaksView>) => () => void update($, view, cur => ({ ...cur, confirmClear: false, ...patch }))
+    const set = (patch: Partial<LeaksView>) => () => void update($, view, cur => ({ ...cur, confirmClear: false, notice: null, ...patch }))
     const pickProject = (value: string) =>
       void update($, view, cur => ({ ...cur, confirmClear: false, project: value === current ? null : value }))
     const clear = async () => {
@@ -490,11 +600,15 @@ export const register: Register = (on, options) => {
       await update($, view, cur => ({ ...cur, confirmClear: false }))
       await update($, rev, n => (n ?? 0) + 1)
     }
+    const notice = (deny: string | null) => update($, view, cur => ({ ...cur, notice: deny ? `Not changed: ${deny}` : null }))
+    const chooseHere = (mode: Mode | null) => async () => notice((await setHere($, settings, mode)).deny)
+    const chooseDefault = (mode: Mode) => async () => notice(await writeSetting($, settings, 'mode', mode))
+    const removeRule = (path: string) => async () =>
+      notice(await writeSetting($, settings, 'rules', formatRules(withRule(settings.rules, path, null), home)))
 
-    const all = Object.values(log)
     const counts = {
       private: all.filter(f => f.category === 'private').length,
-      medical: all.filter(f => f.category === 'medical').length,
+      secret: all.filter(f => f.category === 'secret').length,
       hits: all.reduce((s, f) => s + f.count, 0),
     }
     const last = all.reduce((t, f) => Math.max(t, f.lastAt), 0)
@@ -503,32 +617,75 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
           {TABS.map(t => (
-            <Button key={`tab-${t.id}`} label={t.label} hotkey={t.hotkey} variant={v.tab === t.id ? 'primary' : 'secondary'} onPress={set({ tab: t.id })} />
+            <Button key={`tab-${t.id}`} label={t.label} hotkey={t.hotkey} variant={tab === t.id ? 'primary' : 'secondary'} onPress={set({ tab: t.id })} />
           ))}
-          {FILTERS.map(f => (
-            <Button key={`filter-${f.id}`} label={f.label} hotkey={f.hotkey} variant={v.filter === f.id ? 'primary' : 'secondary'} onPress={set({ filter: f.id })} />
-          ))}
-          {Select && projects.length > 1 && (
+          {tab !== 'modes' &&
+            FILTERS.map(f => (
+              <Button key={`filter-${f.id}`} label={f.label} hotkey={f.hotkey} variant={filter === f.id ? 'primary' : 'secondary'} onPress={set({ filter: f.id })} />
+            ))}
+          {tab !== 'modes' && Select && projects.length > 1 && (
             <Select key="project" options={projects.map(p => ({ value: p, label: p === current ? `${p} (current)` : p }))} value={shown} onSelect={pickProject} />
           )}
         </Box>
         <Box key="summary" flexDirection="column">
           <Text bold>{shown}</Text>
-          <Text dimColor>{`Mode: ${settings.mode}`}</Text>
+          <Text dimColor>{clip(modeLine, cols)}</Text>
           <Text dimColor>
             {all.length === 0
               ? 'Nothing seen yet'
-              : `${counts.private} private, ${counts.medical} medical, ${counts.hits} occurrences, last ${fmtWhen(last, now)}`}
+              : `${counts.private} private, ${counts.secret} secret, ${counts.hits} occurrences, last ${fmtWhen(last, now)}`}
           </Text>
         </Box>
       </Box>
     )
 
+    if (tab === 'modes') {
+      const exact = settings.rules.find(r => r.path === here.replace(/\\/g, '/'))
+      return (
+        <Box flexDirection="column" gap={1}>
+          {header}
+          <Box key="modes-here" flexDirection="column">
+            <Text bold>This project</Text>
+            <Text dimColor>{clip(tilde(here, home), cols)}</Text>
+          </Box>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            {MODES.map(m => (
+              <Button key={`here-${m}`} label={MODE_LABELS[m]} variant={exact?.mode === m ? 'primary' : 'secondary'} onPress={chooseHere(m)} />
+            ))}
+            <Button key="here-default" label={`Default (${settings.mode})`} variant={exact ? 'secondary' : 'primary'} onPress={chooseHere(null)} />
+          </Box>
+          <Text bold>Default mode</Text>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            {MODES.map(m => (
+              <Button key={`default-${m}`} label={MODE_LABELS[m]} variant={settings.mode === m ? 'primary' : 'secondary'} onPress={chooseDefault(m)} />
+            ))}
+          </Box>
+          <Text bold>Rules</Text>
+          <Box key="rules" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+            {settings.rules.length === 0 ? (
+              <Text dimColor>No rules: every folder uses the default mode</Text>
+            ) : (
+              settings.rules.map((r, i) => (
+                <Box key={`rule-${i}`} flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
+                  <Text>{clip(`${tilde(r.path, home)} = ${r.mode}`, Math.max(12, cols - 14))}</Text>
+                  <Button key={`rule-remove-${i}`} label="Remove" onPress={removeRule(r.path)} />
+                </Box>
+              ))
+            )}
+          </Box>
+          <Text dimColor>A file read takes the stricter of the session's mode and its own folder's.</Text>
+          {v.notice ? <Text key="notice" color="red">{v.notice}</Text> : null}
+        </Box>
+      )
+    }
+
     if (findings.length === 0) {
       return (
         <Box flexDirection="column" gap={1}>
           {header}
-          <Text dimColor>No {v.filter === 'all' ? 'sensitive' : v.filter} data seen by the model in this project.</Text>
+          <Text dimColor>
+            {filter === 'secret' ? 'No secrets' : `No ${filter === 'private' ? 'private' : 'sensitive'} data`} seen by the model in this project.
+          </Text>
         </Box>
       )
     }
@@ -541,7 +698,7 @@ export const register: Register = (on, options) => {
     const origin = (hit: Hit) => clip(`${VIA_LABELS[hit.via]}: ${hit.source}, ${ACTION_LABELS[hit.action ?? 'seen']}`, cols - 4)
 
     let body: RenderChildren
-    if (v.tab === 'findings') {
+    if (tab === 'findings') {
       body = findings.map(f => {
         const latest = f.hits[0]
         return (

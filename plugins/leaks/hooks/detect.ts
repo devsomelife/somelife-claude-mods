@@ -1,8 +1,21 @@
-// Private and medical data detectors: pure functions, no engine access
+// Personal identifiers and secrets detectors: pure functions, no engine access
 
-export type Category = 'private' | 'medical'
+export type Category = 'private' | 'secret'
 
-export type Kind = 'email' | 'phone' | 'iban' | 'card' | 'nir' | 'ssn' | 'birthdate' | 'health'
+export type Kind =
+  | 'email'
+  | 'phone'
+  | 'iban'
+  | 'card'
+  | 'nir'
+  | 'be-nrn'
+  | 'es-dni'
+  | 'it-cf'
+  | 'ssn'
+  | 'api-key'
+  | 'private-key'
+  | 'url-password'
+  | 'jwt'
 
 export type Match = {
   kind: Kind
@@ -23,10 +36,17 @@ export const KINDS: Record<Kind, { label: string; category: Category }> = {
   iban: { label: 'IBAN', category: 'private' },
   card: { label: 'Card number', category: 'private' },
   nir: { label: 'Social security (FR)', category: 'private' },
+  'be-nrn': { label: 'National number (BE)', category: 'private' },
+  'es-dni': { label: 'DNI/NIE (ES)', category: 'private' },
+  'it-cf': { label: 'Codice fiscale (IT)', category: 'private' },
   ssn: { label: 'SSN (US)', category: 'private' },
-  birthdate: { label: 'Date of birth', category: 'private' },
-  health: { label: 'Health term', category: 'medical' },
+  'api-key': { label: 'API key', category: 'secret' },
+  'private-key': { label: 'Private key', category: 'secret' },
+  'url-password': { label: 'URL password', category: 'secret' },
+  jwt: { label: 'JWT', category: 'secret' },
 }
+
+export const isKind = (k: unknown): k is Kind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(KINDS, k)
 
 // FNV-1a, 32 bits, as 8 hex chars
 export const fnv1a = (s: string) => {
@@ -82,51 +102,154 @@ const nirValid = (raw: string) => {
   return 97 - (Number(body) % 97) === key
 }
 
+// Belgian national register number: a birth date, a serial and a mod-97 key, with a 2 in front for births from 2000
+const beValid = (raw: string) => {
+  const d = digitsOf(raw)
+  const month = Number(d.slice(2, 4))
+  if (!(month <= 12 || (month >= 20 && month <= 32) || (month >= 40 && month <= 52))) return false
+  if (Number(d.slice(4, 6)) > 31) return false
+  const body = Number(d.slice(0, 9))
+  const key = Number(d.slice(9))
+  return 97 - (body % 97) === key || 97 - ((2e9 + body) % 97) === key
+}
+
+const DNI_LETTERS = 'TRWAGMYFPDXBNJZSQVHLCKE'
+
+// Spanish DNI (8 digits) or NIE (X, Y or Z and 7 digits), and their mod-23 letter
+const dniValid = (raw: string) => {
+  const s = raw.replace('-', '').toUpperCase()
+  const n = Number(s.slice(0, -1).replace(/^[XYZ]/, c => String('XYZ'.indexOf(c))))
+  return DNI_LETTERS[n % 23] === s.slice(-1)
+}
+
+// Italian codice fiscale: values of each character in odd positions (1st, 3rd...), digits then letters
+const CF_ODD = [1, 0, 5, 7, 9, 13, 15, 17, 19, 21, 1, 0, 5, 7, 9, 13, 15, 17, 19, 21, 2, 4, 18, 20, 11, 3, 6, 8, 12, 14, 16, 10, 22, 25, 24, 23]
+
+const cfValid = (raw: string) => {
+  const s = raw.toUpperCase()
+  let sum = 0
+  for (let i = 0; i < 15; i++) {
+    const c = s.charCodeAt(i)
+    const v = c <= 57 ? c - 48 : c - 55
+    sum += i % 2 === 0 ? (CF_ODD[v] ?? 0) : v <= 9 ? v : v - 10
+  }
+  return String.fromCharCode(65 + (sum % 26)) === s[15]
+}
+
 const boring = (digits: string) => /^(\d)\1+$/.test(digits) || '01234567890123456789'.includes(digits)
 
+// Two-digit country calling codes; 1 and 7 are the one-digit ones, every other code has three digits
+const CC2 = new Set(
+  '20 27 30 31 32 33 34 36 39 40 41 43 44 45 46 47 48 49 51 52 53 54 55 56 57 58 60 61 62 63 64 65 66 81 82 84 86 90 91 92 93 94 95 98'.split(' '),
+)
+
+// National number lengths where they are fixed or well bounded; others take 6 to 12 digits
+const NSN: Record<string, readonly [number, number]> = {
+  '1': [10, 10],
+  '7': [10, 10],
+  '31': [9, 9],
+  '32': [8, 9],
+  '33': [9, 9],
+  '34': [9, 9],
+  '39': [6, 11],
+  '41': [9, 9],
+  '44': [9, 10],
+  '49': [6, 13],
+  '212': [9, 9],
+  '213': [8, 9],
+  '216': [8, 8],
+  '351': [9, 9],
+  '352': [4, 11],
+}
+
+// The number in international form: + and the digits, without the "(0)" some write after the country code
+const phoneNorm = (raw: string) => `+${digitsOf(raw.replace('(0)', '')).replace(/^00/, '')}`
+
+const phoneValid = (raw: string) => {
+  const d = phoneNorm(raw).slice(1)
+  const cc = d[0] === '1' || d[0] === '7' ? d.slice(0, 1) : CC2.has(d.slice(0, 2)) ? d.slice(0, 2) : d.slice(0, 3)
+  const nsn = d.slice(cc.length)
+  const [min, max] = NSN[cc] ?? [6, 12]
+  if (nsn.length < min || nsn.length > max || d.length > 15 || boring(nsn)) return false
+  if (cc === '1') return /^[2-9]\d\d[2-9]/.test(nsn)
+  return nsn[0] !== '0'
+}
+
+// A phone match followed by another group of digits is part of a longer number
+const continued = (m: RegExpExecArray) => /^[ .-]?\d/.test(m.input.slice(m.index + m[0].length, m.index + m[0].length + 2))
+
 // What a text holds, checked once, so detectors that cannot match are skipped
-type Traits = { at: boolean; plus: boolean; dash: boolean; digit: boolean }
+type Traits = { at: boolean; dash: boolean; digit: boolean; scheme: boolean; pem: boolean; jwt: boolean }
 
 type Detector = {
   kind: Kind
   re: RegExp
   need?: (t: Traits) => boolean
   check?: (m: RegExpExecArray) => boolean
-  value?: (m: RegExpExecArray) => string
-  mask: (value: string) => string
-  norm: (value: string) => string
+  // The part of the match that is the value, and where it starts in the match; the whole match by default
+  part?: (m: RegExpExecArray) => readonly [number, string]
+  mask: (value: string, m: RegExpExecArray) => string
+  norm: (value: string, m: RegExpExecArray) => string
 }
 
 const FILE_TLDS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'js', 'ts', 'tsx', 'css', 'json', 'md', 'lock'])
 
-// Health terms matched in any case
-const HEALTH_WORDS = [
-  'diagnosis', 'diagnoses', 'diagnosed with', 'diagnostiquée?s?',
-  'prescription', 'prescribed', 'ordonnance médicale',
-  'medical records?', 'medical history', 'health records?', 'dossier médical', 'antécédents médicaux', 'carnet de santé',
-  'blood type', 'groupe sanguin',
-  'cancers?', 'tumou?rs?', 'tumeurs?', 'chemotherapy', 'chimiothérapie', 'radiotherapy', 'radiothérapie', 'oncology', 'oncologie',
-  'diabetes', 'diabetic', 'diabète', 'diabétique',
-  'depression', 'dépression', 'depressive', 'dépressi(?:f|ve)', 'antidepressants?', 'antidépresseurs?',
-  'bipolar', 'bipolaire', 'schizophrenia', 'schizophrénie', 'schizophrène', 'psychosis', 'psychose',
-  'psychiatric', 'psychiatrique', 'psychiatrist', 'psychiatre',
-  'suicidal', 'suicidaire', 'suicide attempt', 'tentative de suicide',
-  'epilepsy', 'épilepsie', 'asthma', 'asthme', 'hepatitis', 'hépatite', 'tuberculosis', 'tuberculose',
-  'pregnancy', 'pregnant', 'grossesse', 'abortion', 'avortement', 'miscarriage', 'fausse couche',
-  "alzheimer's?", 'parkinson', 'autism', 'autistic', 'autisme', 'autiste',
-  'anorexia', 'anorexie', 'bulimia', 'boulimie',
-  'disability', 'handicapée?', 'allerg(?:y|ies|ic)', 'allergies?', 'allergique',
-  'insulin', 'insuline', 'sick leave', 'arrêt maladie', 'arrêt de travail', 'medical certificate', 'certificat médical',
-  'carte vitale',
-  'xanax', 'prozac', 'zoloft', 'lexomil', 'levothyrox', 'ritalin', 'ritaline', 'subutex', 'truvada', 'metformine?',
+// Credentials in documentation and config templates, not real ones
+const PLACEHOLDER_PASSWORDS = new Set(['password', 'pass', 'pwd', 'secret', 'xxx', 'xxxx'])
+
+const API_KEYS = [
+  '(?:AKIA|ASIA)[0-9A-Z]{16}',
+  'gh[pousr]_[A-Za-z0-9]{36,}',
+  'github_pat_[A-Za-z0-9_]{22,}',
+  'glpat-[A-Za-z0-9_-]{20,}',
+  'sk-ant-[A-Za-z0-9_-]{20,}',
+  'sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}',
+  '[sr]k_(?:live|test)_[A-Za-z0-9]{16,}',
+  'xox[abposr]-[A-Za-z0-9-]{10,}',
+  'hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+',
+  'AIza[0-9A-Za-z_-]{35}',
+  'npm_[A-Za-z0-9]{36}',
+  'SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}',
+  'hf_[A-Za-z0-9]{34,}',
 ]
 
-// Health acronyms, matched in capitals only ("AIDS" yes, "aids" no)
-const HEALTH_ACRONYMS = ['HIV', 'VIH', 'AIDS', 'SIDA', 'ADHD', 'TDAH', 'PTSD', 'TSPT', 'IVG', 'COPD', 'BPCO']
-
-const edge = (alts: string[]) => `(?<![\\p{L}\\p{N}_])(?:${alts.join('|')})(?![\\p{L}\\p{N}_])`
+const keep = (head: number, tail: number) => (v: string) => `${v.slice(0, head)}****${v.slice(-tail)}`
 
 const DETECTORS: Detector[] = [
+  {
+    kind: 'private-key',
+    // The body stops at the first run of five dashes; "\\n" keeps keys escaped inside JSON strings whole
+    re: /-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----(?:[A-Za-z0-9+/=\s:,.\\]|-(?!----))*(?:-----END ([A-Z0-9]+ )*PRIVATE KEY-----)?/g,
+    need: t => t.pem,
+    mask: v => v.slice(0, v.indexOf('KEY-----') + 8),
+    norm: v => v.replace(/\s|\\n/g, ''),
+  },
+  {
+    kind: 'jwt',
+    re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*/g,
+    need: t => t.jwt,
+    mask: v => `eyJ**** (${v.length} chars)`,
+    norm: v => v,
+  },
+  {
+    kind: 'api-key',
+    re: new RegExp(`(?<![A-Za-z0-9_-])(?:${API_KEYS.join('|')})(?![A-Za-z0-9_-])`, 'g'),
+    mask: keep(4, 4),
+    norm: v => v,
+  },
+  {
+    kind: 'url-password',
+    // Only the password is the value; the scheme, user and host stay readable
+    re: /\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@"'<>]{1,128}:)([^\s@/"'<>]{1,256})@([^\s/?#"'<>]{1,253})/gi,
+    need: t => t.scheme && t.at,
+    check: m => {
+      const pw = m[2] ?? ''
+      return !/^[$%{<*]/.test(pw) && !PLACEHOLDER_PASSWORDS.has(pw.toLowerCase())
+    },
+    part: m => [(m[1] ?? '').length, m[2] ?? ''],
+    mask: (v, m) => `${m[1] ?? ''}***@${m[3] ?? ''}`,
+    norm: (v, m) => `${(m[1] ?? '').toLowerCase()}${v}@${(m[3] ?? '').toLowerCase()}`,
+  },
   {
     kind: 'email',
     // Starts only where a run of address characters starts, and bounded to the RFC limits,
@@ -168,102 +291,101 @@ const DETECTORS: Detector[] = [
     norm: v => v.replace(/\s/g, '').toUpperCase(),
   },
   {
+    kind: 'phone',
+    // International form, + or 00 then the country code; the country code and length are checked after
+    re: /(?<![\w+])(?:\+|00)[1-9][\d .()/-]{5,22}\d/g,
+    need: t => t.digit,
+    check: m => !continued(m) && phoneValid(m[0]),
+    mask: v => maskAlnum(v, 0, 2),
+    norm: phoneNorm,
+  },
+  {
+    kind: 'phone',
+    // French national form, 0 then 9 digits; stored as +33 so both forms are one value
+    re: /(?<![\w+.])0[1-9](?:[ .-]?\d{2}){4}(?!\d)/g,
+    need: t => t.digit,
+    check: m => !continued(m) && !boring(digitsOf(m[0])),
+    mask: v => maskAlnum(v, 0, 2),
+    norm: v => `+33${digitsOf(v).slice(1)}`,
+  },
+  {
+    kind: 'be-nrn',
+    re: /(?<![\d.])\d{2}\.?\d{2}\.?\d{2}[-.]?\d{3}\.?\d{2}(?![\d])/g,
+    need: t => t.digit,
+    check: m => beValid(m[0]),
+    mask: v => maskAlnum(v, 0, 2),
+    norm: digitsOf,
+  },
+  {
+    kind: 'es-dni',
+    re: /(?<![A-Za-z0-9])(?:\d{8}|[XYZ]\d{7})-?[A-Z](?![A-Za-z0-9])/g,
+    need: t => t.digit,
+    check: m => dniValid(m[0]),
+    mask: v => maskAlnum(v, 0, 1),
+    norm: v => v.replace('-', '').toUpperCase(),
+  },
+  {
+    kind: 'it-cf',
+    // Digits may be replaced by L to V when two people share a code
+    re: /(?<![A-Za-z0-9])[A-Z]{6}[\dLMNP-V]{2}[ABCDEHLMPRST][\dLMNP-V]{2}[A-Z][\dLMNP-V]{3}[A-Z](?![A-Za-z0-9])/gi,
+    need: t => t.digit,
+    check: m => cfValid(m[0]),
+    mask: v => maskAlnum(v, 0, 1),
+    norm: v => v.toUpperCase(),
+  },
+  {
     kind: 'ssn',
     re: /(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])/g,
     need: t => t.dash && t.digit,
     mask: v => maskAlnum(v, 0, 4),
     norm: digitsOf,
   },
-  {
-    kind: 'phone',
-    // French numbers, local or +33
-    re: /(?<![\w+])(?:(?:\+|00)33[ .-]?|0)[1-9](?:[ .-]?\d{2}){4}(?!\d)/g,
-    need: t => t.digit,
-    check: m => !boring(digitsOf(m[0])),
-    mask: v => maskAlnum(v, 0, 2),
-    norm: v => digitsOf(v).replace(/^(?:0033|33)/, '0'),
-  },
-  {
-    kind: 'phone',
-    // Other international numbers, written with a leading +
-    re: /(?<![\w+])\+(?!33)[1-9]\d{0,2}(?:[ .-]?\(?\d{2,4}\)?){2,5}(?!\d)/g,
-    need: t => t.plus && t.digit,
-    check: m => {
-      const n = digitsOf(m[0]).length
-      return n >= 8 && n <= 15
-    },
-    mask: v => maskAlnum(v, 0, 2),
-    norm: digitsOf,
-  },
-  {
-    kind: 'birthdate',
-    re: /(?:date of birth|birth ?date|d\.o\.b\.?|\bdob|\bborn(?: on)?|\bnée? le|date de naissance)["']?\s*[:=]?\s*["']?(\d{1,2}[/.-]\d{1,2}[/.-](?:19|20)\d{2}|(?:19|20)\d{2}-\d{2}-\d{2})/gi,
-    need: t => t.digit,
-    value: m => m[1] ?? m[0],
-    mask: v => (/^\d{4}/.test(v) ? v.replace(/(?<=^\d{4}.*)\d/g, '*') : v.replace(/\d(?=.*\d{4}$)/g, '*')),
-    norm: digitsOf,
-  },
-  {
-    kind: 'health',
-    re: new RegExp(edge(HEALTH_WORDS), 'giu'),
-    mask: v => v.toLowerCase(),
-    norm: v => v.toLowerCase(),
-  },
-  {
-    kind: 'health',
-    re: new RegExp(edge(HEALTH_ACRONYMS), 'gu'),
-    mask: v => v,
-    norm: v => v.toUpperCase(),
-  },
-  {
-    kind: 'health',
-    re: /\b(?:ICD-?10|CIM-?10)\s*[:-]?\s*[A-TV-Z]\d{2}(?:\.\d{1,2})?\b/gi,
-    need: t => t.digit,
-    mask: v => v,
-    norm: v => v.toUpperCase().replace(/\s/g, ''),
-  },
 ]
 
 export type Span = Match & { start: number; end: number }
 
-// Every occurrence of a private or medical value in `text`, minus those `ignore` names
+// Every occurrence of a personal identifier or secret in `text`, minus those `ignore` names
 export const spansOf = (text: string, ignore: readonly string[] = []): Span[] => {
   const out: Span[] = []
-  const traits: Traits = { at: text.includes('@'), plus: text.includes('+'), dash: text.includes('-'), digit: /\d/.test(text) }
+  const traits: Traits = {
+    at: text.includes('@'),
+    dash: text.includes('-'),
+    digit: /\d/.test(text),
+    scheme: text.includes('://'),
+    pem: text.includes('PRIVATE KEY-----'),
+    jwt: text.includes('eyJ'),
+  }
   // Characters already claimed, so an IBAN's digits are not also a card or a phone; made on the first claim
   let taken: Uint8Array | null = null
   for (const d of DETECTORS) {
     if (d.need && !d.need(traits)) continue
     d.re.lastIndex = 0
     for (let m = d.re.exec(text); m !== null; m = d.re.exec(text)) {
-      const start = m.index
-      const end = start + m[0].length
       if (d.check && !d.check(m)) continue
-      if (d.kind !== 'health' && taken !== null && taken.subarray(start, end).includes(1)) continue
-      const raw = d.value ? d.value(m) : m[0]
-      const value = raw.trim()
+      const [offset, value] = d.part ? d.part(m) : [0, m[0]]
+      const start = m.index + offset
+      const end = start + value.length
+      if (taken !== null && taken.subarray(start, end).includes(1)) continue
       const lower = value.toLowerCase()
       if (ignore.some(i => lower.includes(i))) continue
-      if (d.kind !== 'health') (taken ??= new Uint8Array(text.length)).fill(1, start, end)
-      // A value inside the match (a date after its label) is the part redacted
-      const at = start + m[0].indexOf(raw) + (raw.length - raw.trimStart().length)
-      const key = `${d.kind}:${d.norm(value)}`
+      ;(taken ??= new Uint8Array(text.length)).fill(1, start, end)
+      const key = `${d.kind}:${d.norm(value, m)}`
       out.push({
         kind: d.kind,
         category: KINDS[d.kind].category,
         value,
-        masked: d.mask(value),
+        masked: d.mask(value, m),
         fingerprint: fnv1a(key),
         key,
-        start: at,
-        end: at + value.length,
+        start,
+        end,
       })
     }
   }
   return out.sort((a, b) => a.start - b.start || b.end - a.end)
 }
 
-// Every private or medical value in `text`, once each
+// Every personal identifier or secret in `text`, once each
 export const detect = (text: string, ignore: readonly string[] = []): Match[] => {
   const found = new Map<string, Match>()
   for (const { start: _s, end: _e, ...m } of spansOf(text, ignore)) if (!found.has(m.fingerprint)) found.set(m.fingerprint, m)
@@ -273,7 +395,7 @@ export const detect = (text: string, ignore: readonly string[] = []): Match[] =>
 export const placeholder = (kind: Kind) => `[redacted:${kind}]`
 
 // Matches the placeholders `redact` writes
-export const PLACEHOLDER = /\[redacted:[a-z]+\]/
+export const PLACEHOLDER = /\[redacted:[a-z-]+\]/
 
 // `text` with each span replaced by its placeholder; overlapping spans keep the first
 export const redact = (text: string, spans: readonly Span[]) => {

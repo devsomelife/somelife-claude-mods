@@ -1,7 +1,7 @@
 {
   "name": "leaks",
-  "version": "0.3.0",
-  "description": "Notices private and medical data that reaches the model, lists it per project, and can redact or block it",
+  "version": "0.5.0",
+  "description": "Notices personal identifiers and secrets that reach the model, lists them per project, and can redact or block them, with a mode per folder",
   "author": {
     "name": "Greg",
     "email": "dev@somelife.eu"
@@ -10,14 +10,21 @@
   "userConfig": {
     "mode": {
       "type": "string",
-      "title": "Mode",
-      "description": "redact (default): replace each value with a placeholder before the model reads it; notify: record and notify only; block: withhold content and refuse prompts that hold such data",
+      "title": "Default mode",
+      "description": "Mode where no rule applies. redact (default): replace each value with a placeholder before the model reads it; notify: record and notify only; block: withhold content and refuse prompts that hold such data; off: no scan",
       "options": [
         "redact",
         "notify",
-        "block"
+        "block",
+        "off"
       ],
       "default": "redact"
+    },
+    "rules": {
+      "type": "string",
+      "title": "Modes per folder",
+      "description": "Comma-separated folder=mode entries, for example ~/clients/acme=block, ~/perso=off; the deepest folder holding a path wins, and a file read takes the stricter of the session's mode and its own folder's",
+      "default": ""
     },
     "failClosed": {
       "type": "boolean",
@@ -40,7 +47,7 @@
     "storeRawValues": {
       "type": "boolean",
       "title": "Keep full values",
-      "description": "Keep the full values found in the history instead of masked ones",
+      "description": "Keep full personal identifiers in the history instead of masked ones; secrets stay masked",
       "default": false
     },
     "ignore": {
