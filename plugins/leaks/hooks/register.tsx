@@ -3,10 +3,26 @@ import type { EngineInterface, Register, RenderChildren, SessionAppendInput, Ses
 
 import type { LeaksFilter, LeaksTab, LeaksView } from '../types'
 import { KINDS, PLACEHOLDER, isKind, redact, spansOf } from './detect'
-import { MODES, absolute, formatRules, isMode, parseRules, ruleFor, stricter, tilde, withRule } from './rules'
+import {
+  MODES,
+  absolute,
+  formatFolderIgnores,
+  formatRules,
+  isMode,
+  matcher,
+  parseFolderIgnores,
+  parsePatterns,
+  parseRules,
+  patternsFor,
+  ruleFor,
+  stricter,
+  tilde,
+  withIgnore,
+  withRule,
+} from './rules'
 import { sha256 } from './sha256'
 import type { Category, Kind, Match, Span } from './detect'
-import type { Mode, Rule } from './rules'
+import type { FolderIgnore, Mode, Rule } from './rules'
 
 export type { Mode } from './rules'
 
@@ -56,7 +72,7 @@ const COLORS: Record<Category, string> = { private: '#3987e5', secret: '#e8a33d'
 const TABS: { id: LeaksTab; label: string; hotkey: string }[] = [
   { id: 'findings', label: 'Findings', hotkey: 'f' },
   { id: 'timeline', label: 'Timeline', hotkey: 't' },
-  { id: 'modes', label: 'Modes', hotkey: 'm' },
+  { id: 'rules', label: 'Rules', hotkey: 'r' },
 ]
 const FILTERS: { id: LeaksFilter; label: string; hotkey: string }[] = [
   { id: 'all', label: 'All', hotkey: 'a' },
@@ -124,13 +140,27 @@ type Piece = { text: string; via: Via; source: string }
 
 type Found = { m: Match; p: Piece; action: Action }
 
-// `mode` is the default mode; `rules` set other modes per folder
-type Settings = { mode: Mode; rules: Rule[]; rulesText: string; notify: string; storeRaw: boolean; ignore: string[]; failClosed: boolean }
+// `mode` is the default mode and `rules` set other modes per folder;
+// `ignore` holds the entries skipped everywhere and `folderIgnores` those skipped per folder
+type Settings = {
+  mode: Mode
+  rules: Rule[]
+  rulesText: string
+  ignore: string[]
+  folderIgnores: FolderIgnore[]
+  folderIgnoreText: string
+  notify: string
+  storeRaw: boolean
+  failClosed: boolean
+}
 
-// Scans one text in `s.mode`; in redact or block mode also answers what replaces it
-export const guard = (s: Pick<Settings, 'mode' | 'ignore'>, p: Piece, canChange: boolean) => {
+// How one text is scanned: its mode, and whether a value or source is ignored
+export type Scan = { mode: Mode; skip: (s: string) => boolean }
+
+// Scans one text; in redact or block mode also answers what replaces it
+export const guard = (s: Scan, p: Piece, canChange: boolean) => {
   if (s.mode === 'off') return { text: p.text, found: [] as Found[], spans: [] as Span[] }
-  const spans: Span[] = s.ignore.some(i => p.source.toLowerCase().includes(i)) ? [] : spansOf(p.text, s.ignore)
+  const spans: Span[] = s.skip(p.source) ? [] : spansOf(p.text, s.skip)
   const action: Action = spans.length === 0 || !canChange || s.mode === 'notify' ? 'seen' : s.mode === 'redact' ? 'redacted' : 'blocked'
   const seen = new Set<string>()
   const found: Found[] = []
@@ -165,8 +195,8 @@ const resultIds = (e: SessionAppendInput) =>
   e.message.content.flatMap(b => (b.type === 'tool_result' && typeof b.tool_use_id === 'string' ? [b.tool_use_id] : []))
 
 // One row as the model will read it: scanned, and rewritten in redact or block mode.
-// `s.mode` is the session's; a tool result takes the mode its call was given
-export const guardRow = (s: Settings, e: SessionAppendInput) => {
+// `s` is the session's scan; a tool result takes the scan its call was given
+export const guardRow = (s: Scan, e: SessionAppendInput) => {
   const message = e.message
   const sub = e.agentId !== undefined ? ' (subagent)' : ''
   const rowVia: Via = e.door === 'prompt' ? 'prompt' : e.door === 'response' ? 'model' : 'context'
@@ -200,7 +230,7 @@ export const guardRow = (s: Settings, e: SessionAppendInput) => {
     if (b.type === 'tool_result') {
       const id = typeof b.tool_use_id === 'string' ? b.tool_use_id : ''
       const call = toolCalls.get(id)
-      const ts = call ? { ...s, mode: call.mode } : s
+      const ts: Scan = call ? { mode: call.mode, skip: call.skip } : s
       const source = (call?.label ?? (e.origin.kind === 'tool' ? e.origin.tool : 'tool')) + sub
       const piece = (text: string) => ({ text, via: 'tool' as const, source })
       if (!Array.isArray(b.content)) {
@@ -230,8 +260,12 @@ export const guardRow = (s: Settings, e: SessionAppendInput) => {
 }
 
 // Session-scoped facts, rebuilt on reload
-// What each tool call touched and the mode its result is read in
-const toolCalls = new Map<string, { label: string; mode: Mode }>()
+// What each tool call touched and how its result is scanned
+const toolCalls = new Map<string, Scan & { label: string }>()
+// Full values of this session's findings by stored id, so the pane can ignore them; never written anywhere
+const rawThisSession = new Map<string, string>()
+// Ignore matchers by the folders they apply to, rebuilt when a setting changes
+const skipCache = new Map<string, (s: string) => boolean>()
 const seenThisSession = new Set<string>()
 let root = ''
 let home = ''
@@ -340,6 +374,7 @@ async function flush($: EngineInterface, s: Settings) {
   }
   const key = await secretOf($)
   const stored = found.map(f => idFor(key, f.m.key))
+  found.forEach((f, i) => rawThisSession.set(stored[i] ?? f.m.fingerprint, f.m.value))
 
   await edit($, project, log => {
     found.forEach(({ m, p, action }, i) => {
@@ -383,17 +418,40 @@ async function prune($: EngineInterface, retentionDays: number) {
 // This mod's rows in /config, `<plugin>.<field>`, whatever marketplace it came from
 const OWN_ROW = /^leaks(?:@[^.]*)?\.(\w+)$/
 
-// Takes a new value of the default mode or the rules
+// Takes a new value of the default mode, the rules or the ignore lists
 function applySetting(s: Settings, field: string, value: unknown) {
   if (field === 'mode' && isMode(value)) s.mode = value
-  if (field === 'rules' && typeof value === 'string') {
+  if (typeof value !== 'string') return
+  if (field === 'rules') {
     s.rulesText = value
     s.rules = parseRules(value, home)
   }
+  if (field === 'ignore') s.ignore = parsePatterns(value, ',')
+  if (field === 'folderIgnore') {
+    s.folderIgnoreText = value
+    s.folderIgnores = parseFolderIgnores(value, home)
+  }
+  skipCache.clear()
 }
 
+// Whether a value or source is ignored, for content tied to `paths`: the global entries and those of their folders
+function skipFor(s: Settings, paths: readonly string[]) {
+  const key = paths.join('\n')
+  let skip = skipCache.get(key)
+  if (!skip) {
+    skip = matcher(patternsFor(s.ignore, s.folderIgnores, paths.filter(p => p !== '')))
+    skipCache.set(key, skip)
+  }
+  return skip
+}
+
+type Field = 'mode' | 'rules' | 'ignore' | 'folderIgnore'
+
+// An ignore entry cannot hold the separators of the settings it is written in
+const badPattern = (pattern: string) => (/[,|]/.test(pattern) || pattern.trim() === '' ? 'an entry cannot be empty or hold "," or "|"' : null)
+
 // Writes one of this mod's settings as the /config menu would; the reason when refused
-async function writeSetting($: EngineInterface, s: Settings, field: 'mode' | 'rules', value: string): Promise<string | null> {
+async function writeSetting($: EngineInterface, s: Settings, field: Field, value: string): Promise<string | null> {
   const row = (await $.config.list()).find(r => OWN_ROW.exec(r.key)?.[1] === field)
   if (!row) return `The leaks "${field}" setting was not found in /config`
   const res = await $.config.set({ key: row.key, value })
@@ -410,10 +468,29 @@ async function setHere($: EngineInterface, s: Settings, mode: Mode | null) {
   return { path, deny }
 }
 
+// Adds an entry to, or removes it from, the current project's ignore list
+async function ignoreHere($: EngineInterface, s: Settings, pattern: string, add: boolean) {
+  const path = await projectRootOf($)
+  const deny = badPattern(pattern) ?? (await writeSetting($, s, 'folderIgnore', formatFolderIgnores(withIgnore(s.folderIgnores, path, pattern, add), home)))
+  return { path, deny }
+}
+
+// Adds an entry to, or removes it from, the global ignore list
+async function ignoreEverywhere($: EngineInterface, s: Settings, pattern: string, add: boolean) {
+  const list = [...s.ignore.filter(p => p !== pattern), ...(add ? [pattern] : [])]
+  return badPattern(pattern) ?? (await writeSetting($, s, 'ignore', list.join(',')))
+}
+
 // The mod's own sources and tests hold sample values, which would flag on every read
-const DEFAULT_IGNORE = 'example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks'
-const USAGE =
-  'Usage: /some-leaks opens the pane; /some-leaks mode <off|notify|redact|block|default> sets this project; /some-leaks default <off|notify|redact|block> sets the default'
+const DEFAULT_IGNORE = '*example.com,*example.org,*example.net,*noreply*,*no-reply*,git@github.com,git@gitlab.com,*plugins/leaks/hooks*'
+const USAGE = [
+  'Usage:',
+  '/some-leaks opens the pane',
+  '/some-leaks mode <off|notify|redact|block|default> sets this project',
+  '/some-leaks default <off|notify|redact|block> sets the default',
+  '/some-leaks ignore [--global] <entry> ignores a value in this project, or everywhere; * stands for any characters',
+  '/some-leaks unignore [--global] <entry> stops ignoring it',
+].join('\n')
 
 export const register: Register = (on, options) => {
   const retentionDays = typeof options.retentionDays === 'number' ? options.retentionDays : 90
@@ -425,18 +502,20 @@ export const register: Register = (on, options) => {
     notify: typeof options.notify === 'string' ? options.notify : 'toast',
     storeRaw: options.storeRawValues === true,
     failClosed: options.failClosed !== false,
-    ignore: (typeof options.ignore === 'string' ? options.ignore : DEFAULT_IGNORE)
-      .split(',')
-      .map(s => s.trim().toLowerCase())
-      .filter(s => s !== ''),
+    ignore: parsePatterns(typeof options.ignore === 'string' ? options.ignore : DEFAULT_IGNORE, ','),
+    folderIgnores: [],
+    folderIgnoreText: typeof options.folderIgnore === 'string' ? options.folderIgnore : '',
   }
 
   const modeAt = (path: string): Mode => ruleFor(settings.rules, path)?.mode ?? settings.mode
   const sessionMode = (): Mode => (root ? modeAt(root) : settings.mode)
-  // A file read takes the stricter of the session's mode and its own folder's
-  const callMode = (input: Record<string, unknown>): Mode => {
+  const sessionScan = (): Scan => ({ mode: sessionMode(), skip: skipFor(settings, [root]) })
+  // A file read takes the stricter of the session's mode and its own folder's, and both folders' ignore lists
+  const callScan = (input: Record<string, unknown>): Scan => {
     const path = pathOf(input)
-    return path ? stricter(sessionMode(), modeAt(absolute(path, root))) : sessionMode()
+    if (!path) return sessionScan()
+    const file = absolute(path, root)
+    return { mode: stricter(sessionMode(), modeAt(file)), skip: skipFor(settings, [root, file]) }
   }
   // The strictest mode any part of the row is read in
   const rowMode = (e: SessionAppendInput) =>
@@ -453,6 +532,8 @@ export const register: Register = (on, options) => {
     root = await $.session.root()
     home = ((await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined)) ?? '').replace(/\\/g, '/')
     settings.rules = parseRules(settings.rulesText, home)
+    settings.folderIgnores = parseFolderIgnores(settings.folderIgnoreText, home)
+    skipCache.clear()
     await prune($, retentionDays)
     return next(e)
   })
@@ -475,7 +556,21 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'some-leaks' }, async ($, e) => {
-    const [verb = '', arg = ''] = e.args.trim().toLowerCase().split(/\s+/)
+    const words = e.args.trim().split(/\s+/)
+    const verb = (words[0] ?? '').toLowerCase()
+    const arg = (words[1] ?? '').toLowerCase()
+    if (verb === 'ignore' || verb === 'unignore') {
+      const global = arg === '--global'
+      const pattern = words.slice(global ? 2 : 1).join(' ')
+      if (pattern === '') return { text: USAGE }
+      const add = verb === 'ignore'
+      if (global) {
+        const deny = await ignoreEverywhere($, settings, pattern, add)
+        return { text: deny ? `Not changed: ${deny}` : `${pattern} is ${add ? 'now ignored' : 'no longer ignored'} everywhere.` }
+      }
+      const { path, deny } = await ignoreHere($, settings, pattern, add)
+      return { text: deny ? `Not changed: ${deny}` : `${pattern} is ${add ? 'now ignored' : 'no longer ignored'} in ${tilde(path, home)}.` }
+    }
     if (verb === 'mode' && (isMode(arg) || arg === 'default')) {
       const { path, deny } = await setHere($, settings, isMode(arg) ? arg : null)
       if (deny) return { text: `Not changed: ${deny}` }
@@ -494,8 +589,9 @@ export const register: Register = (on, options) => {
   // in redact and block modes, refuses to write placeholders back over the real values
   on('tool.call', ($, e, next) => {
     const input = e as unknown as Record<string, unknown>
-    const mode = callMode(input)
-    toolCalls.set(e.tool_use_id, { label: describeTool(String(e.tool), input, root), mode })
+    const scan = callScan(input)
+    const mode = scan.mode
+    toolCalls.set(e.tool_use_id, { ...scan, label: describeTool(String(e.tool), input, root) })
     if ((mode === 'redact' || mode === 'block') && WRITERS.has(String(e.tool)) && PLACEHOLDER.test(stringsOf(input).join('\n'))) {
       return {
         deny:
@@ -512,7 +608,7 @@ export const register: Register = (on, options) => {
     root = await $.session.root()
     const mode = sessionMode()
     if (mode !== 'block') return next(e)
-    const g = guard({ ...settings, mode }, { text: e.text, via: 'prompt', source: 'prompt' }, true)
+    const g = guard(sessionScan(), { text: e.text, via: 'prompt', source: 'prompt' }, true)
     if (g.found.length === 0) return next(e)
     collect($, settings, g.found)
     if (e.origin.kind === 'composer') {
@@ -529,7 +625,7 @@ export const register: Register = (on, options) => {
     if (!scanned(e) || rowMode(e) === 'off') return next(e)
     let guarded: ReturnType<typeof guardRow> | null = null
     try {
-      guarded = guardRow({ ...settings, mode: sessionMode() }, e)
+      guarded = guardRow(sessionScan(), e)
     } catch {
       if (strictIn(rowMode(e)) && e.door !== 'response') guarded = { message: withheldRow(e.message), found: [] }
     }
@@ -544,7 +640,7 @@ export const register: Register = (on, options) => {
   on('model.complete', async ($, e, next) => {
     const mode = sessionMode()
     if (mode === 'off') return next(e)
-    const s = { ...settings, mode }
+    const s = sessionScan()
     const p = guard(s, { text: e.prompt, via: 'side-call', source: `complete ${e.model}` }, true)
     const sys = e.system === undefined ? null : guard(s, { text: e.system, via: 'side-call', source: `complete ${e.model}` }, true)
     const found = [...p.found, ...(sys?.found ?? [])]
@@ -557,7 +653,7 @@ export const register: Register = (on, options) => {
   on('model.fork', async ($, e, next) => {
     const mode = sessionMode()
     if (mode === 'off') return next(e)
-    const p = guard({ ...settings, mode }, { text: e.prompt, via: 'side-call', source: 'fork' }, true)
+    const p = guard(sessionScan(), { text: e.prompt, via: 'side-call', source: 'fork' }, true)
     collect($, settings, p.found)
     if (p.found.length === 0 || mode === 'notify') return next(e)
     if (mode === 'block') return { deny: `Not sent: the request contains ${kindsOf(p.found)} (leaks mod, block mode)` }
@@ -605,6 +701,11 @@ export const register: Register = (on, options) => {
     const chooseDefault = (mode: Mode) => async () => notice(await writeSetting($, settings, 'mode', mode))
     const removeRule = (path: string) => async () =>
       notice(await writeSetting($, settings, 'rules', formatRules(withRule(settings.rules, path, null), home)))
+    const ignoreValue = (value: string, global: boolean) => async () =>
+      notice(global ? await ignoreEverywhere($, settings, value, true) : (await ignoreHere($, settings, value, true)).deny)
+    const removeGlobalIgnore = (pattern: string) => async () => notice(await ignoreEverywhere($, settings, pattern, false))
+    const removeFolderIgnore = (path: string, pattern: string) => async () =>
+      notice(await writeSetting($, settings, 'folderIgnore', formatFolderIgnores(withIgnore(settings.folderIgnores, path, pattern, false), home)))
 
     const counts = {
       private: all.filter(f => f.category === 'private').length,
@@ -619,11 +720,11 @@ export const register: Register = (on, options) => {
           {TABS.map(t => (
             <Button key={`tab-${t.id}`} label={t.label} hotkey={t.hotkey} variant={tab === t.id ? 'primary' : 'secondary'} onPress={set({ tab: t.id })} />
           ))}
-          {tab !== 'modes' &&
+          {tab !== 'rules' &&
             FILTERS.map(f => (
               <Button key={`filter-${f.id}`} label={f.label} hotkey={f.hotkey} variant={filter === f.id ? 'primary' : 'secondary'} onPress={set({ filter: f.id })} />
             ))}
-          {tab !== 'modes' && Select && projects.length > 1 && (
+          {tab !== 'rules' && Select && projects.length > 1 && (
             <Select key="project" options={projects.map(p => ({ value: p, label: p === current ? `${p} (current)` : p }))} value={shown} onSelect={pickProject} />
           )}
         </Box>
@@ -636,10 +737,11 @@ export const register: Register = (on, options) => {
               : `${counts.private} private, ${counts.secret} secret, ${counts.hits} occurrences, last ${fmtWhen(last, now)}`}
           </Text>
         </Box>
+        {v.notice ? <Text key="notice" color="red">{v.notice}</Text> : null}
       </Box>
     )
 
-    if (tab === 'modes') {
+    if (tab === 'rules') {
       const exact = settings.rules.find(r => r.path === here.replace(/\\/g, '/'))
       return (
         <Box flexDirection="column" gap={1}>
@@ -660,7 +762,7 @@ export const register: Register = (on, options) => {
               <Button key={`default-${m}`} label={MODE_LABELS[m]} variant={settings.mode === m ? 'primary' : 'secondary'} onPress={chooseDefault(m)} />
             ))}
           </Box>
-          <Text bold>Rules</Text>
+          <Text bold>Mode rules</Text>
           <Box key="rules" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
             {settings.rules.length === 0 ? (
               <Text dimColor>No rules: every folder uses the default mode</Text>
@@ -674,7 +776,35 @@ export const register: Register = (on, options) => {
             )}
           </Box>
           <Text dimColor>A file read takes the stricter of the session's mode and its own folder's.</Text>
-          {v.notice ? <Text key="notice" color="red">{v.notice}</Text> : null}
+          <Text bold>Ignored everywhere</Text>
+          <Box key="ignore-global" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+            {settings.ignore.length === 0 ? (
+              <Text dimColor>Nothing</Text>
+            ) : (
+              settings.ignore.map((p, i) => (
+                <Box key={`ignore-global-${i}`} flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
+                  <Text>{clip(p, Math.max(12, cols - 14))}</Text>
+                  <Button key={`ignore-global-remove-${i}`} label="Remove" onPress={removeGlobalIgnore(p)} />
+                </Box>
+              ))
+            )}
+          </Box>
+          <Text bold>Ignored per folder</Text>
+          <Box key="ignore-folders" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+            {settings.folderIgnores.length === 0 ? (
+              <Text dimColor>Nothing</Text>
+            ) : (
+              settings.folderIgnores.flatMap((f, i) =>
+                f.patterns.map((p, j) => (
+                  <Box key={`ignore-folder-${i}-${j}`} flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
+                    <Text>{clip(`${tilde(f.path, home)}: ${p}`, Math.max(12, cols - 14))}</Text>
+                    <Button key={`ignore-folder-remove-${i}-${j}`} label="Remove" onPress={removeFolderIgnore(f.path, p)} />
+                  </Box>
+                )),
+              )
+            )}
+          </Box>
+          <Text dimColor>In an entry, * stands for any characters: *@acme.com ignores a whole domain. Add one from a finding, or with /some-leaks ignore.</Text>
         </Box>
       )
     }
@@ -701,6 +831,8 @@ export const register: Register = (on, options) => {
     if (tab === 'findings') {
       body = findings.map(f => {
         const latest = f.hits[0]
+        // Only this session's findings can be ignored from here: stored values are masked
+        const raw = shown === current ? rawThisSession.get(f.id) : undefined
         return (
           <Box key={`finding-${f.id}`} flexDirection="column">
             <Box flexDirection="row" gap={1} flexWrap="wrap">
@@ -710,6 +842,12 @@ export const register: Register = (on, options) => {
             </Box>
             <Text dimColor>{`  last ${fmtWhen(f.lastAt, now)}, first ${fmtWhen(f.firstAt, now)}`}</Text>
             {latest && <Text dimColor>{`  ${origin(latest)}`}</Text>}
+            {raw !== undefined && (
+              <Box flexDirection="row" gap={1}>
+                <Button key={`ignore-here-${f.id}`} label="Ignore here" onPress={ignoreValue(raw, false)} />
+                <Button key={`ignore-all-${f.id}`} label="Ignore everywhere" onPress={ignoreValue(raw, true)} />
+              </Box>
+            )}
           </Box>
         )
       })

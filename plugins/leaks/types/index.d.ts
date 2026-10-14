@@ -1,4 +1,4 @@
-export type LeaksTab = 'findings' | 'timeline' | 'modes'
+export type LeaksTab = 'findings' | 'timeline' | 'rules'
 
 export type LeaksFilter = 'all' | 'private' | 'secret'
 

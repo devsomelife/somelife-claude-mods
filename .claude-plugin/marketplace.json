@@ -25,8 +25,8 @@
     {
       "name": "leaks",
       "source": "./plugins/leaks",
-      "description": "Notices personal identifiers and secrets that reach the model, lists them per project, and can redact or block them, with a mode per folder",
-      "version": "0.5.0",
+      "description": "Notices personal identifiers and secrets that reach the model, lists them per project, and can redact or block them, with modes and ignore lists per folder",
+      "version": "0.6.0",
       "category": "privacy"
     }
   ]

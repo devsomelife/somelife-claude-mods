@@ -344,8 +344,8 @@ const DETECTORS: Detector[] = [
 
 export type Span = Match & { start: number; end: number }
 
-// Every occurrence of a personal identifier or secret in `text`, minus those `ignore` names
-export const spansOf = (text: string, ignore: readonly string[] = []): Span[] => {
+// Every occurrence of a personal identifier or secret in `text`, minus the values `skip` answers true for
+export const spansOf = (text: string, skip?: (value: string) => boolean): Span[] => {
   const out: Span[] = []
   const traits: Traits = {
     at: text.includes('@'),
@@ -366,8 +366,7 @@ export const spansOf = (text: string, ignore: readonly string[] = []): Span[] =>
       const start = m.index + offset
       const end = start + value.length
       if (taken !== null && taken.subarray(start, end).includes(1)) continue
-      const lower = value.toLowerCase()
-      if (ignore.some(i => lower.includes(i))) continue
+      if (skip?.(value)) continue
       ;(taken ??= new Uint8Array(text.length)).fill(1, start, end)
       const key = `${d.kind}:${d.norm(value, m)}`
       out.push({
@@ -386,9 +385,9 @@ export const spansOf = (text: string, ignore: readonly string[] = []): Span[] =>
 }
 
 // Every personal identifier or secret in `text`, once each
-export const detect = (text: string, ignore: readonly string[] = []): Match[] => {
+export const detect = (text: string, skip?: (value: string) => boolean): Match[] => {
   const found = new Map<string, Match>()
-  for (const { start: _s, end: _e, ...m } of spansOf(text, ignore)) if (!found.has(m.fingerprint)) found.set(m.fingerprint, m)
+  for (const { start: _s, end: _e, ...m } of spansOf(text, skip)) if (!found.has(m.fingerprint)) found.set(m.fingerprint, m)
   return [...found.values()]
 }
 

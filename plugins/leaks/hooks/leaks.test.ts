@@ -3,7 +3,20 @@ import type { On, SessionAppendInput } from 'claude-code'
 
 import { detect, fnv1a, placeholder, redact, spansOf } from './detect'
 import { describeTool, guard, idFor, withheldRow } from './register'
-import { absolute, formatRules, parseRules, ruleFor, stricter, withRule } from './rules'
+import {
+  absolute,
+  formatFolderIgnores,
+  formatRules,
+  matcher,
+  parseFolderIgnores,
+  parsePatterns,
+  parseRules,
+  patternsFor,
+  ruleFor,
+  stricter,
+  withIgnore,
+  withRule,
+} from './rules'
 
 // 2026-10-12 at 14:02 local time
 const NOW = new Date(2026, 9, 12, 14, 2).getTime()
@@ -128,7 +141,7 @@ test('redacts the password of a URL, not the user or host', () => {
 })
 
 test('ignores values and leaves health terms and names alone', () => {
-  expect(detect('jane@example.com', ['example.com'])).toEqual([])
+  expect(detect('jane@example.com', matcher(['*example.com']))).toEqual([])
   expect(kinds('Patient Jean Dupont, diabetes, born on 12/03/1984')).toEqual([])
 })
 
@@ -293,7 +306,7 @@ test('block mode withholds tool results and refuses prompts', { options: { mode:
 
 test('side model calls get the same treatment as rows', () => {
   const piece = { text: 'summarize: jane.doe@gmail.com', via: 'side-call' as const, source: 'complete' }
-  const base = { notify: 'toast', storeRaw: false, ignore: [], failClosed: true }
+  const base = { skip: () => false }
   expect(guard({ ...base, mode: 'notify' }, piece, true)).toMatchObject({ text: piece.text })
   expect(guard({ ...base, mode: 'redact' }, piece, true)).toMatchObject({ text: 'summarize: [redacted:email]' })
   expect(guard({ ...base, mode: 'block' }, piece, true).text).toContain('Withheld by the leaks mod')
@@ -464,7 +477,7 @@ test('the pane sets the mode of the project and the default', async ($, on) => {
   const values = config(on, { 'leaks@somelife-claude-mods.mode': 'redact', 'leaks@somelife-claude-mods.rules': '' })
   await $.session.start(START)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-modes' })
+  await ui.press({ key: 'tab-rules' })
   expect(await ui.find({ text: /No rules/ })).toBeDefined()
 
   await ui.press({ key: 'here-block' })
@@ -506,4 +519,90 @@ test('a change made in /config applies at once', async ($, on) => {
   })
   await $.session.append(prompt('mail jane.doe@gmail.com'))
   expect(keptText(rows, 'row-prompt')).toContain('jane.doe@gmail.com')
+})
+
+test('ignore entries match whole values, with * for any characters', () => {
+  const skip = matcher(parsePatterns('dev@acme.com, *@corp.io, example.com, noreply', ','))
+  expect(skip('dev@acme.com')).toBe(true)
+  expect(skip('DEV@ACME.COM')).toBe(true)
+  expect(skip('mydev@acme.com')).toBe(false)
+  expect(skip('anyone@corp.io')).toBe(true)
+  expect(skip('jane@sub.example.com')).toBe(true)
+  expect(skip('github-noreply@users.github.com')).toBe(true)
+  expect(skip('jane@gmail.com')).toBe(false)
+  expect(matcher(['a.b'])('aXb')).toBe(false)
+})
+
+test('reads ignore lists per folder', () => {
+  const list = parseFolderIgnores('~/clients/acme=*@acme.com|noreply@*, /srv=x@y.z, broken, ~/empty=', HOME)
+  expect(list).toEqual([
+    { path: '/home/me/clients/acme', patterns: ['*@acme.com', 'noreply@*'] },
+    { path: '/srv', patterns: ['x@y.z'] },
+  ])
+  expect(patternsFor(['g@g.com'], list, ['/home/me/clients/acme/src'])).toEqual(['g@g.com', '*@acme.com', 'noreply@*'])
+  expect(patternsFor([], list, ['/home/me/clients/other'])).toEqual([])
+  expect(formatFolderIgnores(withIgnore(list, '/srv', 'x@y.z', false), HOME)).toBe('~/clients/acme=*@acme.com|noreply@*')
+  expect(formatFolderIgnores(withIgnore(list, '/home/me/p', 'a@b.c', true), HOME)).toBe(
+    '~/clients/acme=*@acme.com|noreply@*, /srv=x@y.z, ~/p=a@b.c',
+  )
+})
+
+test('an ignore list applies to its folder only', { options: { mode: 'notify', folderIgnore: '/tmp/dumps=*@gmail.com' } }, async ($, on) => {
+  mock.store(on)
+  const { toasts, settle } = session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Read', file_path: '/tmp/dumps/a.txt', tool_use_id: 'tu1' })
+  await $.session.append(toolResult('tu1', 'jane.doe@gmail.com'))
+  await settle()
+  expect(toasts).toHaveLength(0)
+  await $.session.append(prompt('jane.doe@gmail.com'))
+  await settle()
+  expect(toasts).toHaveLength(1)
+})
+
+test('former ignore entries keep matching as before', { options: { mode: 'notify', ignore: 'example.com,noreply' } }, async ($, on) => {
+  mock.store(on)
+  const { toasts, settle } = session(on)
+  await $.session.start(START)
+  await $.session.append(prompt('jane@example.com, noreply@github.com, jane.doe@gmail.com'))
+  await settle()
+  expect(toasts).toHaveLength(1)
+  expect(toasts[0]).toContain('j***@gmail.com')
+  expect(toasts[0]).not.toContain('example.com')
+})
+
+test('a finding of this session can be ignored from the pane', { options: { mode: 'notify', ignore: '' } }, async ($, on) => {
+  mock.store(on)
+  const { settle } = session(on)
+  const values = config(on, { 'leaks.ignore': '', 'leaks.folderIgnore': '' })
+  await $.session.start(START)
+  await $.session.append(prompt('mail jane.doe@gmail.com'))
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const here = (await ui.find({ type: 'Button', text: 'Ignore here' }))?.key ?? ''
+  const all = (await ui.find({ type: 'Button', text: 'Ignore everywhere' }))?.key ?? ''
+  await ui.press({ key: here })
+  expect(values['leaks.folderIgnore']).toBe('~/workspaces/clinic=jane.doe@gmail.com')
+  await ui.press({ key: all })
+  expect(values['leaks.ignore']).toBe('jane.doe@gmail.com')
+  await ui.press({ key: 'tab-rules' })
+  expect(await ui.find({ text: /~\/workspaces\/clinic: jane\.doe@gmail\.com/ })).toBeDefined()
+  await ui.press({ key: 'ignore-global-remove-0' })
+  expect(values['leaks.ignore']).toBe('')
+  await ui.press({ key: 'ignore-folder-remove-0-0' })
+  expect(values['leaks.folderIgnore']).toBe('')
+})
+
+test('the command manages both ignore lists', { options: { ignore: '' } }, async ($, on) => {
+  mock.store(on)
+  session(on)
+  const values = config(on, { 'leaks.ignore': '', 'leaks.folderIgnore': '' })
+  await $.session.start(START)
+  expect(await $.command.run({ ...COMMAND, args: 'ignore *@acme.com' })).toMatchObject({ text: '*@acme.com is now ignored in ~/workspaces/clinic.' })
+  expect(values['leaks.folderIgnore']).toBe('~/workspaces/clinic=*@acme.com')
+  expect(await $.command.run({ ...COMMAND, args: 'ignore --global *@corp.io' })).toMatchObject({ text: '*@corp.io is now ignored everywhere.' })
+  expect(values['leaks.ignore']).toBe('*@corp.io')
+  await $.command.run({ ...COMMAND, args: 'unignore *@acme.com' })
+  expect(values['leaks.folderIgnore']).toBe('')
+  expect(await $.command.run({ ...COMMAND, args: 'ignore a,b' })).toMatchObject({ text: expect.stringContaining('Not changed') })
 })

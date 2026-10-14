@@ -1,7 +1,7 @@
 {
   "name": "leaks",
-  "version": "0.5.0",
-  "description": "Notices personal identifiers and secrets that reach the model, lists them per project, and can redact or block them, with a mode per folder",
+  "version": "0.6.0",
+  "description": "Notices personal identifiers and secrets that reach the model, lists them per project, and can redact or block them, with modes and ignore lists per folder",
   "author": {
     "name": "Greg",
     "email": "dev@somelife.eu"
@@ -52,9 +52,15 @@
     },
     "ignore": {
       "type": "string",
-      "title": "Ignore list",
-      "description": "Comma-separated texts: a finding whose value or source contains one is skipped",
-      "default": "example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks"
+      "title": "Ignored everywhere",
+      "description": "Comma-separated entries; a finding whose value or source matches one is skipped. * stands for any characters: *@acme.com ignores a whole domain",
+      "default": "*example.com,*example.org,*example.net,*noreply*,*no-reply*,git@github.com,git@gitlab.com,*plugins/leaks/hooks*"
+    },
+    "folderIgnore": {
+      "type": "string",
+      "title": "Ignored per folder",
+      "description": "Comma-separated folder=entry|entry items, for example ~/clients/acme=*@acme.com|noreply@*; they apply to content tied to that folder, on top of the global list",
+      "default": ""
     },
     "retentionDays": {
       "type": "number",

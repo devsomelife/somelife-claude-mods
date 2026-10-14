@@ -4,13 +4,13 @@ Watches everything the model reads or writes for personal identifiers and secret
 
 | | |
 | --- | --- |
-| Use | `/some-leaks` opens the pane; `/some-leaks mode block` sets this project's mode; `/some-leaks default redact` sets the default |
+| Use | `/some-leaks` opens the pane; `/some-leaks mode block` sets this project's mode; `/some-leaks default redact` sets the default; `/some-leaks ignore <entry>` ignores a value |
 | Watches | Your prompts, tool results, files and context added to the conversation, the model's replies and tool inputs, subagents, other mods' side model calls |
 | Detects | Personal identifiers: emails, phone numbers, IBANs, card numbers, national ids (FR, BE, ES, IT, US). Secrets: API keys, private keys, passwords in URLs, JWTs |
 | Notifies | Once per value and session, by toast, system notification, both or off |
 | Modes | `redact` (default), `notify`, `block`, `off`; one per folder if you want |
 | Changes Claude's behaviour | Yes by default: `redact` and `block` change what the model reads; `notify` changes nothing |
-| Settings | `mode`, `rules`, `failClosed`, `notify`, `storeRawValues`, `ignore`, `retentionDays` |
+| Settings | `mode`, `rules`, `ignore`, `folderIgnore`, `failClosed`, `notify`, `storeRawValues`, `retentionDays` |
 
 ## Scope
 
@@ -96,7 +96,7 @@ Three ways to change them, all writing the same settings:
 
 ```mermaid
 flowchart LR
-    Pane["Pane, Modes tab"] --> Settings["settings.json: mode, rules"]
+    Pane["Pane, Rules tab"] --> Settings["settings.json: mode, rules"]
     Command["/some-leaks mode, /some-leaks default"] --> Settings
     Config["/config"] --> Settings
     Settings --> Mod["leaks mod, applied at once"]
@@ -104,11 +104,39 @@ flowchart LR
 
 | Where | How |
 | --- | --- |
-| Pane, `Modes` tab (`m`) | Buttons for this project's mode (or back to the default), the default mode, and a list of rules to remove |
+| Pane, `Rules` tab (`r`) | Buttons for this project's mode (or back to the default), the default mode, and a list of rules to remove |
 | Command | `/some-leaks mode <off\|notify\|redact\|block\|default>` for this project, `/some-leaks default <mode>` for the default |
 | `/config` | The `Default mode` and `Modes per folder` rows |
 
 - This project is the git repository's root folder, or the session's folder outside git
+- Every change applies at once, no restart needed
+
+## Ignore Lists
+
+| List | Setting | Applies to |
+| --- | --- | --- |
+| Global | `ignore` | Everything |
+| Per folder | `folderIgnore`, `folder=entry\|entry` items separated by commas | Content tied to that folder: the session's folder for prompts and replies, and also the file's folder for a file read |
+
+```
+ignore:       *example.com, git@github.com, dev@somelife.eu
+folderIgnore: ~/workspaces/clients/acme=*@acme.com|noreply@*, ~/workspaces/perso=*@gmail.com
+```
+
+- An entry matches a whole value or source, ignoring case: `dev@acme.com` matches that address only, not `mydev@acme.com`
+- `*` stands for any characters: `*@acme.com` ignores a whole domain, `*plugins/leaks/hooks*` every file under that folder
+- A finding is skipped when its value or its source matches an entry of the global list or of a folder that holds the content
+- Entries cannot hold `,` or `|`
+- Entries written for the former "contains" matching (`example.com`, `noreply`, `plugins/leaks/hooks`) are read as their wildcard form
+
+| Where | How |
+| --- | --- |
+| Pane, a finding of this session | "Ignore here" for this project, "Ignore everywhere" for the global list |
+| Pane, `Rules` tab (`r`) | Both lists, each entry with a Remove button |
+| Command | `/some-leaks ignore <entry>` for this project, `/some-leaks ignore --global <entry>`, `/some-leaks unignore [--global] <entry>` |
+| `/config` | The `Ignored everywhere` and `Ignored per folder` rows |
+
+- Only findings of the current session have the Ignore buttons: stored values are masked, so the full value is known only while the session runs, in memory
 - Every change applies at once, no restart needed
 
 ## Security Limits
@@ -224,7 +252,8 @@ Sources keep the tool and the file path, or the host of a URL. Commands, search 
 | Findings: one entry per value, latest first, with count, first and last time, latest source | `f` |
 | Timeline: the 100 latest occurrences, with time and source | `t` |
 | Filter all, private, secrets | `a` / `p` / `s` |
-| Modes: this project's mode, the default mode, the rules | `m` |
+| Rules: this project's mode, the default mode, the mode rules, the ignore lists | `r` |
+| Ignore a finding of this session, here or everywhere | "Ignore here", "Ignore everywhere" |
 | Another project | project picker |
 | Clear the project's history | "Clear project", then confirm |
 
@@ -239,10 +268,11 @@ Each occurrence says what was done with it: `seen`, `redacted` or `blocked`. The
 | `failClosed` | boolean | `true` | In `redact` and `block` modes, a scan that fails or runs out of time withholds the content (or refuses the prompt or side call) instead of letting it through |
 | `notify` | `toast`, `system`, `both`, `off` | `toast` | How a new finding is announced |
 | `storeRawValues` | boolean | `false` | Keep full personal identifiers in the history instead of masked ones; secrets stay masked |
-| `ignore` | string | `example.com,example.org,example.net,noreply,no-reply,git@github.com,git@gitlab.com,plugins/leaks/hooks` | Comma-separated texts; a finding whose value or source contains one is skipped |
+| `ignore` | string | `*example.com,*example.org,*example.net,*noreply*,*no-reply*,git@github.com,git@gitlab.com,*plugins/leaks/hooks*` | Entries ignored everywhere, separated by commas (see Ignore Lists) |
+| `folderIgnore` | string | empty | Entries ignored per folder, `folder=entry\|entry` items separated by commas |
 | `retentionDays` | number | `90` | Days of occurrences kept; older ones are deleted when a session starts |
 
-Change `mode` and `rules` from the pane, the command or `/config`, at once. Change the others, then restart Claude Code:
+Change `mode`, `rules`, `ignore` and `folderIgnore` from the pane, the command or `/config`, at once. Change the others, then restart Claude Code:
 
 ```bash
 echo '{"mode":"notify","notify":"both","ignore":"example.com,mycompany.com"}' | claude plugin configure leaks@somelife-claude-mods --values-stdin
@@ -266,7 +296,7 @@ claude --plugin-dir plugins/leaks
 | 6 | Run `/some-leaks default notify`, then send the prompt of step 1 | A "Sensitive data seen" toast; Claude reads the prompt as typed |
 | 7 | Run `/some-leaks mode block`, then send a prompt holding `4111 1111 1111 1111` | The prompt is refused and put back in the box, the number underlined |
 | 8 | Ask Claude to read `fixtures/config.env` | Claude only gets the withheld notice |
-| 9 | Press `m` in the pane, then `Default` under This project | The rule is gone; the session is back to the default mode |
+| 9 | Press `r` in the pane, then `Default` under This project | The rule is gone; the session is back to the default mode |
 
 - Change `mode` from the pane's `Modes` tab, `/some-leaks default <mode>` or `/config`: it applies at once
 - A value is notified once per session: later steps count it in the pane without a new toast
