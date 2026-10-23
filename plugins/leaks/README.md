@@ -96,10 +96,13 @@ Three ways to change them, all writing the same settings:
 
 ```mermaid
 flowchart LR
-    Pane["Pane, Rules tab"] --> Settings["settings.json: mode, rules"]
-    Command["/some-leaks mode, /some-leaks default"] --> Settings
+    Pane["Pane, Rules tab"] --> Rows{"/config lists the mod's rows"}
+    Command["/some-leaks mode, /some-leaks default"] --> Rows
+    Rows -->|yes| Settings["settings.json: mode, rules"]
+    Rows -->|no| Store["Mod store: overrides"]
     Config["/config"] --> Settings
     Settings --> Mod["leaks mod, applied at once"]
+    Store --> Mod
 ```
 
 | Where | How |
@@ -110,6 +113,9 @@ flowchart LR
 
 - This project is the git repository's root folder, or the session's folder outside git
 - Every change applies at once, no restart needed
+- Some Claude Code builds list no plugin rows in `/config`: the pane and the command then keep the change in the mod's own store, in `~/.claude/plugins/store`
+  - Each kept change remembers the settings value it was made over
+  - A later change of that setting in `/config` or with `claude plugin configure` wins, and the kept change is dropped
 
 ## Ignore Lists
 
@@ -133,7 +139,7 @@ folderIgnore: ~/workspaces/clients/acme=*@acme.com|noreply@*, ~/workspaces/perso
 | --- | --- |
 | Pane, a finding of this session | "Ignore here" for this project, "Ignore everywhere" for the global list |
 | Pane, `Rules` tab (`r`) | Both lists, each entry with a Remove button |
-| Command | `/some-leaks ignore <entry>` for this project, `/some-leaks ignore --global <entry>`, `/some-leaks unignore [--global] <entry>` |
+| Command | `/some-leaks ignore <entry>` for this project, `/some-leaks ignore --global <entry>`, `/some-leaks unignore [--global] <entry>`; `--global` may stand anywhere |
 | `/config` | The `Ignored everywhere` and `Ignored per folder` rows |
 
 - Only findings of the current session have the Ignore buttons: stored values are masked, so the full value is known only while the session runs, in memory

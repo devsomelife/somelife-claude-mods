@@ -1,6 +1,6 @@
 {
   "name": "leaks",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Notices personal identifiers and secrets that reach the model, lists them per project, and can redact or block them, with modes and ignore lists per folder",
   "author": {
     "name": "Greg",

@@ -152,6 +152,8 @@ type Settings = {
   notify: string
   storeRaw: boolean
   failClosed: boolean
+  // The /config values this module loaded with, which a change kept in the store was made over
+  base: Record<Field, string>
 }
 
 // How one text is scanned: its mode, and whether a value or source is ignored
@@ -446,16 +448,39 @@ function skipFor(s: Settings, paths: readonly string[]) {
 }
 
 type Field = 'mode' | 'rules' | 'ignore' | 'folderIgnore'
+const FIELDS: readonly Field[] = ['mode', 'rules', 'ignore', 'folderIgnore']
+
+// Changes made from the pane or the command while /config lists no row for this mod,
+// each with the /config value it was made over: a later change there wins
+const OVERRIDES = 'settings'
+type Overrides = Partial<Record<Field, { value: string; base: string }>>
+
+// Keeps a change in the store, or drops the one kept for `field`
+async function keepOverride($: EngineInterface, field: Field, entry: { value: string; base: string } | null) {
+  const run = async () => {
+    const all = { ...(((await $.store.get(OVERRIDES)) ?? {}) as Overrides) }
+    if (entry) all[field] = entry
+    else if (field in all) delete all[field]
+    else return
+    if (Object.keys(all).length === 0) await $.store.delete(OVERRIDES)
+    else await $.store.set(OVERRIDES, all)
+  }
+  queue = queue.then(run, run)
+  return queue
+}
 
 // An ignore entry cannot hold the separators of the settings it is written in
 const badPattern = (pattern: string) => (/[,|]/.test(pattern) || pattern.trim() === '' ? 'an entry cannot be empty or hold "," or "|"' : null)
 
-// Writes one of this mod's settings as the /config menu would; the reason when refused
+// Writes one of this mod's settings as the /config menu would, or keeps it in the store
+// when the engine lists no row for it; the reason when refused
 async function writeSetting($: EngineInterface, s: Settings, field: Field, value: string): Promise<string | null> {
   const row = (await $.config.list()).find(r => OWN_ROW.exec(r.key)?.[1] === field)
-  if (!row) return `The leaks "${field}" setting was not found in /config`
-  const res = await $.config.set({ key: row.key, value })
-  if (res.deny !== undefined) return res.deny
+  if (row) {
+    const res = await $.config.set({ key: row.key, value })
+    if (res.deny !== undefined) return res.deny
+  }
+  await keepOverride($, field, row ? null : { value, base: s.base[field] })
   applySetting(s, field, value)
   await update($, rev, n => (n ?? 0) + 1)
   return null
@@ -505,6 +530,12 @@ export const register: Register = (on, options) => {
     ignore: parsePatterns(typeof options.ignore === 'string' ? options.ignore : DEFAULT_IGNORE, ','),
     folderIgnores: [],
     folderIgnoreText: typeof options.folderIgnore === 'string' ? options.folderIgnore : '',
+    base: {
+      mode: typeof options.mode === 'string' ? options.mode : '',
+      rules: typeof options.rules === 'string' ? options.rules : '',
+      ignore: typeof options.ignore === 'string' ? options.ignore : '',
+      folderIgnore: typeof options.folderIgnore === 'string' ? options.folderIgnore : '',
+    },
   }
 
   const modeAt = (path: string): Mode => ruleFor(settings.rules, path)?.mode ?? settings.mode
@@ -531,6 +562,13 @@ export const register: Register = (on, options) => {
     })
     root = await $.session.root()
     home = ((await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined)) ?? '').replace(/\\/g, '/')
+    // A change kept in the store applies unless /config changed since
+    const overrides = ((await $.store.get(OVERRIDES).catch(() => undefined)) ?? {}) as Overrides
+    for (const field of FIELDS) {
+      const kept = overrides[field]
+      if (kept?.base === settings.base[field]) applySetting(settings, field, kept.value)
+      else if (kept) await keepOverride($, field, null)
+    }
     settings.rules = parseRules(settings.rulesText, home)
     settings.folderIgnores = parseFolderIgnores(settings.folderIgnoreText, home)
     skipCache.clear()
@@ -549,6 +587,7 @@ export const register: Register = (on, options) => {
     const res = await next(e)
     const field = OWN_ROW.exec(e.key)?.[1]
     if (res.deny === undefined && field) {
+      if ((FIELDS as readonly string[]).includes(field)) await keepOverride($, field as Field, null)
       applySetting(settings, field, res.value)
       await update($, rev, n => (n ?? 0) + 1)
     }
@@ -560,8 +599,11 @@ export const register: Register = (on, options) => {
     const verb = (words[0] ?? '').toLowerCase()
     const arg = (words[1] ?? '').toLowerCase()
     if (verb === 'ignore' || verb === 'unignore') {
-      const global = arg === '--global'
-      const pattern = words.slice(global ? 2 : 1).join(' ')
+      const global = words.slice(1).some(w => w.toLowerCase() === '--global')
+      const pattern = words
+        .slice(1)
+        .filter(w => w.toLowerCase() !== '--global')
+        .join(' ')
       if (pattern === '') return { text: USAGE }
       const add = verb === 'ignore'
       if (global) {

@@ -521,6 +521,46 @@ test('a change made in /config applies at once', async ($, on) => {
   expect(keptText(rows, 'row-prompt')).toContain('jane.doe@gmail.com')
 })
 
+test('with no /config row, the pane keeps its changes in the store', async ($, on) => {
+  mock.store(on)
+  const { rows } = session(on)
+  config(on, {})
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-rules' })
+  await ui.press({ key: 'here-block' })
+  expect(await ui.find({ text: /Not changed/ })).toBeUndefined()
+  expect(await ui.find({ text: /~\/workspaces\/clinic = block/ })).toBeDefined()
+  await $.session.append(prompt('mail jane.doe@gmail.com'))
+  expect(keptText(rows, 'row-prompt')).toContain('Withheld by the leaks mod')
+  await ui.press({ key: 'rule-remove-0' })
+  await ui.press({ key: 'default-off' })
+  expect(await ui.find({ text: /Mode here: off, default/ })).toBeDefined()
+})
+
+test('a change kept in the store applies unless /config changed since', { options: { mode: 'redact', rules: '' } }, async ($, on) => {
+  mock.store(on, {
+    settings: {
+      mode: { value: 'off', base: 'redact' },
+      rules: { value: '~/workspaces/clinic=block', base: '/srv=off' },
+    },
+  })
+  const { rows } = session(on)
+  config(on, {})
+  await $.session.start(START)
+  await $.session.append(prompt('mail jane.doe@gmail.com'))
+  expect(keptText(rows, 'row-prompt')).toContain('jane.doe@gmail.com')
+})
+
+test('the --global flag is read anywhere in the command', async ($, on) => {
+  mock.store(on)
+  session(on)
+  const values = config(on, { 'leaks.ignore': '', 'leaks.folderIgnore': '' })
+  await $.session.start(START)
+  await $.command.run({ ...COMMAND, args: 'ignore *@corp.io --global' })
+  expect(values['leaks.ignore']).toMatch(/,\*@corp\.io$/)
+})
+
 test('ignore entries match whole values, with * for any characters', () => {
   const skip = matcher(parsePatterns('dev@acme.com, *@corp.io, example.com, noreply', ','))
   expect(skip('dev@acme.com')).toBe(true)
